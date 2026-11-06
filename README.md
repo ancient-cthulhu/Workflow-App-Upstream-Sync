@@ -3,9 +3,8 @@
 Keeps the `veracode` repo (Veracode GitHub Workflow Integration) in every org you target in sync with upstream [`veracode/github-actions-integration`](https://github.com/veracode/github-actions-integration), through pull requests.
 
 - **Never pushes to the default branch.** Every change is a pull request a person reviews and merges.
-- **Keeps customer customizations.** A 3-way merge keeps custom files, custom workflow steps and `veracode.yml` settings. `repo_list.yml` is never touched.
+- **Keeps current customizations.** A 3-way merge keeps custom files, custom workflow steps and `veracode.yml` settings. `repo_list.yml` is never touched.
 - **Never guesses.** Anything it cannot merge safely becomes a **draft** PR with conflict markers and a short To do list.
-- **Never overwrites human work.** Branches or PRs with commits from a person are never force-pushed or closed.
 - **Checks itself before every push.** If a result would change a protected or custom file, drop a customer `veracode.yml` value or leave stray conflict markers, that repo gets no PR and the run reports an error.
 - **Rate-limit safe and secure.** One shared limiter paces every GitHub call. The token only ever goes to your GitHub host.
 
@@ -118,11 +117,6 @@ All workers share one limiter, paced at 80% of GitHub's [documented limits](http
 
 On a 403/429 it waits for `retry-after`, else until `x-ratelimit-reset`, else at least a minute with exponential backoff, and pauses every worker. Reads are retried on 5xx and network errors. Writes are not blindly retried: after an ambiguous failure it checks whether the PR was created before trying again, so it never opens duplicates.
 
-- The token is passed to git as an HTTP header scoped to your GitHub host, through the environment. It never appears in command lines, remote URLs or `.git/config`, and is refused if a clone URL points to another host.
-- Git runs with hooks disabled, no prompts, and only `https` (and local `file`) transports.
-- Org and repo names are validated before they reach an API path. The PR branch can never be the default branch.
-- Clones go to a private temp folder that is deleted at the end of the run.
-
 ## Statuses and exit codes
 
 | Status | Meaning |
@@ -135,10 +129,6 @@ On a 403/429 it waits for `retry-after`, else until `x-ratelimit-reset`, else at
 | `error` | See detail. Other orgs still run. |
 
 Exit code: `0` all good, `1` at least one `error`, `2` setup failure (token, upstream). Ctrl+C finishes the repos in progress and reports them.
-
-## Scheduled run
-
-[`examples/veracode-upstream-sync.yml`](examples/veracode-upstream-sync.yml) runs weekly in GitHub Actions. Store the token as secret `VERACODE_SYNC_TOKEN` and commit `orgs.txt` next to the script.
 
 ## Troubleshooting
 
