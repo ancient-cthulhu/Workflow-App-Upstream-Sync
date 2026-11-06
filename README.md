@@ -2,11 +2,10 @@
 
 Keeps the `veracode` repo (Veracode GitHub Workflow Integration) in every org you target in sync with upstream [`veracode/github-actions-integration`](https://github.com/veracode/github-actions-integration), through pull requests.
 
-- **Never pushes to the default branch.** Every change is a pull request a person reviews and merges.
+- Every change is a pull request a person reviews and merges.
 - **Keeps current customizations.** A 3-way merge keeps custom files, custom workflow steps and `veracode.yml` settings. `repo_list.yml` is never touched.
-- **Never guesses.** Anything it cannot merge safely becomes a **draft** PR with conflict markers and a short To do list.
+-  Anything it cannot merge safely becomes a **draft** PR with conflict markers and a short To do list.
 - **Checks itself before every push.** If a result would change a protected or custom file, drop a customer `veracode.yml` value or leave stray conflict markers, that repo gets no PR and the run reports an error.
-- **Rate-limit safe and secure.** One shared limiter paces every GitHub call. The token only ever goes to your GitHub host.
 
 ## Requirements
 
