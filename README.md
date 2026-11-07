@@ -13,23 +13,25 @@ For each organization, the script:
 3. Checks the result:
    - YAML is valid, with no duplicate settings
    - Workflow references still resolve: `needs`, step ids, local actions, helper scripts, and the inputs and secrets of shared workflows
-   - Secrets and variables the new workflows use exist in the repo or org
+   - Secrets and variables the new workflows use exist in the org or the repo (and which old secret to copy when upstream renamed one)
    - New actions are allowed by the Actions policy
    - No custom setting or custom file was lost
 4. Opens a pull request. If every check passes, it's ready to merge. Otherwise it's a draft, labeled `needs-work`, with a To do list. If a custom setting would be lost, no PR is opened and the repo is reported as an error.
 
-It never pushes to the default branch, and never changes a branch that someone else has committed to. `veracode.yml` keeps its current values, and new upstream settings are added.
+It never pushes to the default branch, and never changes a branch that someone else has committed to. `veracode.yml` keeps its current values, and new upstream settings are added. Action versions always come from upstream: if the repo changed a version that upstream also updated, upstream's version is used and the PR lists it. A version pinned to a commit SHA is left as a conflict, so it gets re-pinned instead of unpinned.
 
 ---
 
 ## Quickstart
 
 ```bash
+# 1. Test org first: merge its PR and run a scan
+python veracode_upstream_sync.py --orgs my-test-org
 
-# 1. See what would happen everywhere. No writes, results in ./out
+# 2. See what would happen everywhere. No writes, results in ./out
 python veracode_upstream_sync.py --orgs-file orgs.txt --dry-run
 
-# 2. Roll out a specific version and assign drafts to yourself
+# 3. Roll out the version you tested, assign drafts to yourself
 python veracode_upstream_sync.py --orgs-file orgs.txt --upstream-ref <tested tag or sha> --assign-drafts my-user
 ```
 
@@ -75,6 +77,21 @@ Token in `GH_TOKEN` or `GITHUB_TOKEN`, or a `gh auth login` session:
 
 Exit code `1` if any repo errored, `2` on setup errors (token, upstream).
 
+### Report
+
+`--report run.json` also writes `run.csv`, the list of actions for the team: one row per action, orgs with the least to fix first. Run it with `--dry-run` first to plan the rollout.
+
+| Column | Content |
+|---|---|
+| `org` | The organization |
+| `status` | `Ready to merge`, `Needs fixes`, `No PR: fix by hand`, `Nothing to do` |
+| `fixes_before_merge` | How many actions must be done before merging |
+| `must_fix` | `yes` if this action blocks the merge |
+| `action` | For example `Resolve merge conflict`, `Add renamed org secret`, `Fix broken workflow reference`, `Merge the PR` |
+| `where` | File and line, or the settings page |
+| `details` | What to change, for example `Pick one value for "fetch-depth": yours "fetch-depth: 1" or upstream's "fetch-depth: 0"` |
+| `pr` | Link to the PR |
+
 ---
 
 ## Troubleshooting
@@ -86,3 +103,4 @@ Exit code `1` if any repo errored, `2` on setup errors (token, upstream).
 | `branch ... has commits from someone else` | Delete that branch, then re-run |
 | `would lose your value ... (upstream renamed or removed section ...)` | The repo predates a `veracode.yml` restructure: move those values to the new section by hand once |
 
+---
