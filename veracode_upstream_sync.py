@@ -48,7 +48,7 @@ try:
 except ImportError:  # pragma: no cover
     sys.exit("PyYAML is required: pip install pyyaml")
 
-__version__ = "3.8.0"
+__version__ = "3.9.2"
 
 DEFAULT_UPSTREAM = "https://github.com/veracode/github-actions-integration.git"
 DEFAULT_API = "https://api.github.com"
@@ -81,9 +81,7 @@ LATEST = "latest-release"
 SEMVER_TAG = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 REF_RE = re.compile(r"\b(secrets|vars)\.([A-Za-z_][A-Za-z0-9_]*)")
 SHA_RE = re.compile(r"@[0-9a-f]{40}$")
-MAX_WORKERS = (
-    32  # parallel clones and merges; API calls are paced by the rate limiter either way
-)
+MAX_WORKERS = 32  # parallel clones and merges; API calls are paced by the rate limiter either way
 
 log = logging.getLogger("vsync")
 
@@ -147,9 +145,7 @@ class RateLimiter:
         while True:
             with self._lock:
                 now = self.clock()
-                delay = max(
-                    [self._paused_until - now] + [w.wait(now, c) for w, c in windows]
-                )
+                delay = max([self._paused_until - now] + [w.wait(now, c) for w, c in windows])
                 if delay <= 0:
                     for w, c in windows:
                         w.add(now, c)
@@ -167,9 +163,7 @@ class RateLimiter:
     def pause(self, seconds: float) -> None:
         """Make every worker wait, e.g. after GitHub says the budget is exhausted."""
         with self._lock:
-            self._paused_until = max(
-                self._paused_until, self.clock() + min(seconds, 3900)
-            )
+            self._paused_until = max(self._paused_until, self.clock() + min(seconds, 3900))
 
     def observe(self, headers) -> None:
         if not headers or (headers.get("X-RateLimit-Resource") or "core") != "core":
@@ -190,9 +184,7 @@ class GitHubError(RuntimeError):
     def __init__(self, status: int, msg: str, maybe_applied: bool = False):
         super().__init__(f"HTTP {status}: {msg}" if status else msg)
         self.status = status
-        self.maybe_applied = (
-            maybe_applied  # a write may have landed; check before retrying
-        )
+        self.maybe_applied = maybe_applied  # a write may have landed; check before retrying
 
 
 class GitHub:
@@ -214,9 +206,7 @@ class GitHub:
         a POST raises GitHubError(maybe_applied=True) so the caller can check."""
         idempotent = method != "POST" if idempotent is None else idempotent
         url = path if path.startswith(("https://", "http://")) else self.api + path
-        if not url.startswith(
-            self.api + "/"
-        ):  # e.g. a pagination link: never send the token elsewhere
+        if not url.startswith(self.api + "/"):  # e.g. a pagination link: never send the token elsewhere
             raise GitHubError(
                 0,
                 f"refusing to send the token outside {self.api}: {urllib.parse.urlsplit(url).netloc}",
@@ -233,9 +223,7 @@ class GitHub:
         while True:
             try:
                 with self.limiter.slot(method):
-                    req = urllib.request.Request(
-                        url, data=data, method=method, headers=headers
-                    )
+                    req = urllib.request.Request(url, data=data, method=method, headers=headers)
                     try:
                         with urllib.request.urlopen(req, timeout=60) as resp:
                             status, hdrs, raw = resp.status, resp.headers, resp.read()
@@ -243,14 +231,10 @@ class GitHub:
                         status, hdrs, raw = e.code, e.headers, e.read()
             except (OSError, http.client.HTTPException) as e:
                 if not idempotent:
-                    raise GitHubError(
-                        0, f"network error on {method} {path}: {e}", maybe_applied=True
-                    ) from None
+                    raise GitHubError(0, f"network error on {method} {path}: {e}", maybe_applied=True) from None
                 faults += 1
                 if faults >= 3:
-                    raise GitHubError(
-                        0, f"network error on {method} {path}: {e}"
-                    ) from None
+                    raise GitHubError(0, f"network error on {method} {path}: {e}") from None
                 self.limiter.sleep(2**faults)
                 continue
             self.limiter.observe(hdrs)
@@ -272,9 +256,7 @@ class GitHub:
                 continue
             if status >= 500:
                 if not idempotent:
-                    raise GitHubError(
-                        status, self._message(text, hdrs), maybe_applied=True
-                    )
+                    raise GitHubError(status, self._message(text, hdrs), maybe_applied=True)
                 faults += 1
                 if faults >= 3:
                     raise GitHubError(status, self._message(text, hdrs))
@@ -293,9 +275,7 @@ class GitHub:
             reset = headers.get("X-RateLimit-Reset") or ""
             return max(1, int(reset) - int(time.time()) + 1) if reset.isdigit() else 60
         if status == 429 or "secondary rate limit" in text.lower():
-            return min(
-                60 * 2**attempt, 300
-            )  # GitHub: wait at least a minute, then back off
+            return min(60 * 2**attempt, 300)  # GitHub: wait at least a minute, then back off
         return None
 
     @staticmethod
@@ -333,16 +313,12 @@ def git_env(token: str | None = None, url: str | None = None) -> dict:
     token is a header scoped to the one GitHub host, passed through the
     environment so it never appears in argv, remotes or .git/config."""
     env = os.environ.copy()
-    env.update(
-        GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="true", GIT_ALLOW_PROTOCOL="https:file"
-    )
+    env.update(GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="true", GIT_ALLOW_PROTOCOL="https:file")
     settings = [("core.hooksPath", os.devnull)]
     if token and url and url.startswith("https://"):
         host = urllib.parse.urlsplit(url).netloc
         cred = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-        settings.append(
-            (f"http.https://{host}/.extraHeader", f"Authorization: Basic {cred}")
-        )
+        settings.append((f"http.https://{host}/.extraHeader", f"Authorization: Basic {cred}"))
     n = int(env.get("GIT_CONFIG_COUNT") or 0)
     for i, (key, value) in enumerate(settings, n):
         env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = key, value
@@ -355,9 +331,7 @@ class Git:
 
     def __init__(self, path: Path, env: dict):
         self.path, self.env = Path(path), env
-        self._blobs: dict[
-            str, bytes
-        ] = {}  # content-addressed, so caching is always correct
+        self._blobs: dict[str, bytes] = {}  # content-addressed, so caching is always correct
 
     def run(
         self,
@@ -376,13 +350,9 @@ class Git:
                 check=False,
             )
         except subprocess.TimeoutExpired:
-            raise GitError(
-                f"git {args[0]} timed out after {self.timeout}s (raise --git-timeout)"
-            ) from None
+            raise GitError(f"git {args[0]} timed out after {self.timeout}s (raise --git-timeout)") from None
         if p.returncode != 0:
-            raise GitError(
-                f"git {' '.join(args[:2])} failed: {p.stderr.decode(errors='replace').strip()[-500:]}"
-            )
+            raise GitError(f"git {' '.join(args[:2])} failed: {p.stderr.decode(errors='replace').strip()[-500:]}")
         return p.stdout if raw else p.stdout.decode(errors="replace")
 
     def rev(self, ref: str) -> str:
@@ -413,15 +383,10 @@ class Git:
     def write_blob(self, data: bytes) -> str:
         return self.run("hash-object", "-w", "--stdin", input=data).strip()
 
-    def commit(
-        self, tree: dict, parent: str, message: str, author: tuple[str, str]
-    ) -> str:
+    def commit(self, tree: dict, parent: str, message: str, author: tuple[str, str]) -> str:
         with tempfile.TemporaryDirectory() as td:
             index = {"GIT_INDEX_FILE": str(Path(td) / "index")}
-            info = b"".join(
-                f"{m} blob {s}\t{p}".encode() + b"\0"
-                for p, (m, s) in sorted(tree.items())
-            )
+            info = b"".join(f"{m} blob {s}\t{p}".encode() + b"\0" for p, (m, s) in sorted(tree.items()))
             self.run("update-index", "-z", "--index-info", input=info, env=index)
             tree_sha = self.run("write-tree", "--missing-ok", env=index).strip()
         name, email = author
@@ -431,9 +396,7 @@ class Git:
             "GIT_COMMITTER_NAME": name,
             "GIT_COMMITTER_EMAIL": email,
         }
-        return self.run(
-            "commit-tree", tree_sha, "-p", parent, input=message.encode(), env=ids
-        ).strip()
+        return self.run("commit-tree", tree_sha, "-p", parent, input=message.encode(), env=ids).strip()
 
 
 def clone(url: str, dest: Path, env: dict, branch: str | None = None) -> Git:
@@ -452,9 +415,7 @@ def clone(url: str, dest: Path, env: dict, branch: str | None = None) -> Git:
     except subprocess.TimeoutExpired:
         raise GitError(f"clone of {url} timed out after {Git.timeout}s") from None
     if p.returncode != 0:
-        raise GitError(
-            f"clone failed for {url}: {p.stderr.decode(errors='replace').strip()[-500:]}"
-        )
+        raise GitError(f"clone failed for {url}: {p.stderr.decode(errors='replace').strip()[-500:]}")
     return Git(dest, env)
 
 
@@ -466,9 +427,7 @@ class Upstream:
         self.sha = self.git.rev(self.ref)
         self.commits = self.git.run("rev-list", "--topo-order", self.sha).split()
         self.commit_set = set(self.commits)
-        self.newer = (
-            set(self.git.run("rev-list", "--all").split()) - self.commit_set
-        )  # past the target
+        self.newer = set(self.git.run("rev-list", "--all").split()) - self.commit_set  # past the target
         self.tree = self.git.ls_tree(self.sha)
         if CONFIG_FILE not in self.tree or not any(is_workflow(p) for p in self.tree):
             raise GitError(
@@ -494,9 +453,7 @@ class Upstream:
     def pairs_at(self, commit: str) -> frozenset:
         with self._lock:
             if commit not in self._pairs:
-                self._pairs[commit] = frozenset(
-                    (p, s) for p, (_, s) in self.git.ls_tree(commit).items()
-                )
+                self._pairs[commit] = frozenset((p, s) for p, (_, s) in self.git.ls_tree(commit).items())
             return self._pairs[commit]
 
     def closest_version(self, path: str, text: str, current: str | None) -> str | None:
@@ -505,27 +462,16 @@ class Upstream:
         and wrong for a few; a wrong base makes upstream changes look like local edits."""
         with self._lock:
             if path not in self._versions:
-                raw = self.git.run(
-                    "log", "--no-abbrev", "--raw", "--format=", self.sha, "--", path
-                )
-                shas = {
-                    x
-                    for line in raw.splitlines()
-                    for x in line.split()[2:4]
-                    if x.strip("0")
-                }
+                raw = self.git.run("log", "--no-abbrev", "--raw", "--format=", self.sha, "--", path)
+                shas = {x for line in raw.splitlines() for x in line.split()[2:4] if x.strip("0")}
                 self._versions[path] = sorted(shas)
             versions = self._versions[path]
         local = text.splitlines()
 
         def distance(sha):
             other = self.blob(sha).decode(errors="replace").splitlines()
-            ops = difflib.SequenceMatcher(
-                None, local, other, autojunk=False
-            ).get_opcodes()
-            return sum(
-                max(i2 - i1, j2 - j1) for tag, i1, i2, j1, j2 in ops if tag != "equal"
-            )
+            ops = difflib.SequenceMatcher(None, local, other, autojunk=False).get_opcodes()
+            return sum(max(i2 - i1, j2 - j1) for tag, i1, i2, j1, j2 in ops if tag != "equal")
 
         best, best_d = current, distance(current) if current else len(local) + 1
         for sha in versions:
@@ -536,9 +482,7 @@ class Upstream:
     def structure_baseline(self) -> set:
         """Workflow problems pure upstream already has (so they are not blamed on the merge)."""
         if self._structure is None:
-            self._structure = workflow_problems(
-                {p: self.text(e) for p, e in self.tree.items() if checked_file(p)}
-            )
+            self._structure = workflow_problems({p: self.text(e) for p, e in self.tree.items() if checked_file(p)})
         return self._structure
 
     def web_url(self) -> str | None:
@@ -548,9 +492,7 @@ class Upstream:
 
 def latest_release(git: Git) -> str:
     versions = {
-        t: tuple(int(x) for x in m.groups())
-        for t in git.run("tag", "-l").split()
-        if (m := SEMVER_TAG.match(t))
+        t: tuple(int(x) for x in m.groups()) for t in git.run("tag", "-l").split() if (m := SEMVER_TAG.match(t))
     }
     if not versions:
         raise GitError("upstream has no release tags (vX.Y.Z); pass --upstream-ref")
@@ -570,9 +512,7 @@ def newer_than_target(cust: Git, head: str, ours: Tree, up: Upstream) -> bool:
     would move it backwards (for example it was set up from main, the target is a release)."""
     if marker_commit(cust, ours) in up.newer:
         return True
-    if any(
-        c in up.newer for c in cust.run("rev-list", "--max-count=20000", head).split()
-    ):
+    if any(c in up.newer for c in cust.run("rev-list", "--max-count=20000", head).split()):
         return True
     if not up.newer or MARKER in ours:
         return False
@@ -629,26 +569,16 @@ def workflow_problems(files: dict[str, str]) -> set[tuple[str, str, str]]:
                 problems.add((path, job, msg))
 
             needs = jd.get("needs") or []
-            needs = (
-                [needs]
-                if isinstance(needs, str)
-                else [str(n) for n in needs]
-                if isinstance(needs, list)
-                else []
-            )
+            needs = [needs] if isinstance(needs, str) else [str(n) for n in needs] if isinstance(needs, list) else []
             for n in needs:
                 if n not in jobs:
-                    bad(
-                        f"`needs: {n}` names no job: use the job's new name or remove it"
-                    )
+                    bad(f"`needs: {n}` names no job: use the job's new name or remove it")
             expr = _expressions(jd)
             for n in sorted(set(NEEDS_REF_RE.findall(expr)) - set(needs)):
                 bad(f"add `{n}` to `needs`, since the job uses `needs.{n}`")
             raw_steps = jd.get("steps")
             steps: list = raw_steps if isinstance(raw_steps, list) else []
-            ids = [
-                str(st["id"]) for st in steps if isinstance(st, dict) and st.get("id")
-            ]
+            ids = [str(st["id"]) for st in steps if isinstance(st, dict) and st.get("id")]
             for i in sorted({i for i in ids if ids.count(i) > 1}):
                 bad(f"step id `{i}` is used twice: rename one of the steps")
             for ref in sorted(set(STEPS_REF_RE.findall(expr)) - set(ids)):
@@ -662,18 +592,11 @@ def workflow_problems(files: dict[str, str]) -> set[tuple[str, str, str]]:
                 local = str(st.get("uses") or "")
                 if local.startswith("./"):
                     d = local[2:].rstrip("/")
-                    if (
-                        f"{d}/action.yml" not in files
-                        and f"{d}/action.yaml" not in files
-                    ):
-                        bad(
-                            f"local action `{local}` is missing: restore it or remove the step"
-                        )
+                    if f"{d}/action.yml" not in files and f"{d}/action.yaml" not in files:
+                        bad(f"local action `{local}` is missing: restore it or remove the step")
                 for helper in HELPER_RE.findall(str(st.get("run") or "")):
                     if helper not in files:
-                        bad(
-                            f"`{helper}` is missing: restore it or update the step that runs it"
-                        )
+                        bad(f"`{helper}` is missing: restore it or update the step that runs it")
     return problems
 
 
@@ -683,9 +606,7 @@ def _check_call(files: dict[str, str], callee: str, jd: dict, bad) -> None:
         bad(f"calls `{callee}`, which is missing: restore it or remove this job")
         return
     doc = safe_yaml(files[callee])[0]
-    on = (
-        doc.get("on", doc.get(True)) if isinstance(doc, dict) else None
-    )  # YAML 1.1 reads `on` as True
+    on = doc.get("on", doc.get(True)) if isinstance(doc, dict) else None  # YAML 1.1 reads `on` as True
     call = on.get("workflow_call") if isinstance(on, dict) else None
     call = call if isinstance(call, dict) else {}
     for kind, given in (("inputs", jd.get("with")), ("secrets", jd.get("secrets"))):
@@ -712,16 +633,12 @@ def structure_check(plan: Plan, cust: Git, up: Upstream, ours: Tree) -> None:
         return
     after = {  # conflicted files are fixed by a person first: skip them and their callers
         (path, job, problem)
-        for path, job, problem in workflow_problems(
-            {p: cust.text(e) for p, e in final.items() if checked_file(p)}
-        )
+        for path, job, problem in workflow_problems({p: cust.text(e) for p, e in final.items() if checked_file(p)})
         if path not in conflicted and not any(f"`{c}`" in problem for c in conflicted)
     }
     after -= up.structure_baseline()
     if after:
-        after -= workflow_problems(
-            {p: cust.text(e) for p, e in ours.items() if checked_file(p)}
-        )
+        after -= workflow_problems({p: cust.text(e) for p, e in ours.items() if checked_file(p)})
     for path, job, problem in sorted(after)[:10]:
         loc = locate(cust.text(final[path]).splitlines(), ["jobs", job])
         plan.add(
@@ -729,9 +646,7 @@ def structure_check(plan: Plan, cust: Git, up: Upstream, ours: Tree) -> None:
             f"Fix `{path}`, job `{job}`: {problem}",
             "workflow",
             action="Fix broken workflow reference",
-            where=f"{path} line {loc[0] + 1}, job {job}"
-            if loc
-            else f"{path}, job {job}",
+            where=f"{path} line {loc[0] + 1}, job {job}" if loc else f"{path}, job {job}",
             details=problem[:1].upper() + problem[1:],
         )
 
@@ -764,19 +679,10 @@ def check_settings(gh: GitHub, full: str, plan: Plan, cust: Git, ours: Tree) -> 
     _check_actions_policy(gh, full, plan)
 
 
-def _check_secrets_and_variables(
-    gh: GitHub, full: str, plan: Plan, cust: Git, ours: Tree
-) -> None:
+def _check_secrets_and_variables(gh: GitHub, full: str, plan: Plan, cust: Git, ours: Tree) -> None:
     conflicted = set(plan.changes["conflict"])
-    before = {
-        r
-        for p, e in ours.items()
-        if is_workflow(p)
-        for r in REF_RE.findall(cust.text(e))
-    }
-    needed: dict[
-        tuple[str, str], str
-    ] = {}  # (secrets|vars, name) -> first workflow that uses it
+    before = {r for p, e in ours.items() if is_workflow(p) for r in REF_RE.findall(cust.text(e))}
+    needed: dict[tuple[str, str], str] = {}  # (secrets|vars, name) -> first workflow that uses it
     for p, e in sorted(plan.final.items()):
         if is_workflow(p) and p not in conflicted and e != ours.get(p):
             for ref in REF_RE.findall(cust.text(e)):
@@ -795,11 +701,7 @@ def _check_secrets_and_variables(
         where = f"as an org {label} shared with `{repo}`, or a `{repo}` repo {label} (Settings > Secrets and variables)"
         for name, path in wanted:
             old = RENAMED_SECRETS.get(name) if kind == "secrets" else None
-            renamed = (
-                f"Upstream renamed `{old}` to `{name}`: "
-                if old and (kind, old) in before
-                else ""
-            )
+            renamed = f"Upstream renamed `{old}` to `{name}`: " if old and (kind, old) in before else ""
             value = " with the same value" if renamed else ""
             confirm, add = ("confirm", "add") if renamed else ("Confirm", "Add")
             access = f"give the {repo} repo access (or create it in that repo instead)"
@@ -815,9 +717,7 @@ def _check_secrets_and_variables(
                     True,
                     text,
                     label,
-                    rows=[
-                        {"action": f"Confirm {label} exists", **row, "details": check}
-                    ],
+                    rows=[{"action": f"Confirm {label} exists", **row, "details": check}],
                 )
             elif name not in have:
                 text = f"{renamed}{add} `{name}`{value} {where}, used by `{path}`"
@@ -841,12 +741,8 @@ def _check_actions_policy(gh: GitHub, full: str, plan: Plan) -> None:
         policy: dict = gh.get(f"/repos/{full}/actions/permissions") or {}
         selected: dict = {}
         if policy.get("allowed_actions") == "selected":
-            selected = (
-                gh.get(f"/repos/{full}/actions/permissions/selected-actions") or {}
-            )
-    except (
-        GitHubError
-    ):  # unreadable policy: every new action becomes a "Confirm" To do below
+            selected = gh.get(f"/repos/{full}/actions/permissions/selected-actions") or {}
+    except GitHubError:  # unreadable policy: every new action becomes a "Confirm" To do below
         policy, selected = {}, {}
     for uses in sorted(plan.new_uses):
         name = uses.split("@")[0]
@@ -862,19 +758,13 @@ def _check_actions_policy(gh: GitHub, full: str, plan: Plan) -> None:
             )
             continue
         allowed = policy.get("allowed_actions")
-        github_owned = selected.get("github_owned_allowed") and name.split("/")[
-            0
-        ].lower() in ("actions", "github")
+        github_owned = selected.get("github_owned_allowed") and name.split("/")[0].lower() in ("actions", "github")
         by_pattern = any(
             fnmatch.fnmatch(uses, pat) or fnmatch.fnmatch(name, pat.split("@")[0])
             for pat in selected.get("patterns_allowed") or []
         )
-        if not (
-            allowed == "all" or (allowed == "selected" and (github_owned or by_pattern))
-        ):
-            if allowed == "selected" and selected.get(
-                "verified_allowed"
-            ):  # GitHub has no API to check this
+        if not (allowed == "all" or (allowed == "selected" and (github_owned or by_pattern))):
+            if allowed == "selected" and selected.get("verified_allowed"):  # GitHub has no API to check this
                 plan.add(
                     True,
                     f"Confirm `{name}` is from a verified Marketplace creator, or allow it in Settings > Actions",
@@ -889,9 +779,7 @@ def _check_actions_policy(gh: GitHub, full: str, plan: Plan) -> None:
                     True,
                     f"Allow the action `{name}` in Settings > Actions (it is blocked by policy)",
                     "action",
-                    **_action_row(
-                        "Allow action", f"Add `{name}` to the allowed actions list"
-                    ),
+                    **_action_row("Allow action", f"Add `{name}` to the allowed actions list"),
                 )
         if policy.get("sha_pinning_required") and not SHA_RE.search(uses):
             plan.add(
@@ -937,9 +825,7 @@ def _mapping_without_duplicates(loader, node, deep=False):
     return loader.construct_mapping(node, deep=deep)
 
 
-_StrictLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping_without_duplicates
-)
+_StrictLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping_without_duplicates)
 
 
 def safe_yaml(text: str):
@@ -1006,8 +892,7 @@ def _block_end(lines: list[str], i: int) -> int:
                 break
         j += 1
     while j > i + 1 and (
-        not lines[j - 1].strip()
-        or (lines[j - 1].lstrip().startswith("#") and _ind(lines[j - 1]) <= ind)
+        not lines[j - 1].strip() or (lines[j - 1].lstrip().startswith("#") and _ind(lines[j - 1]) <= ind)
     ):
         j -= 1
     return j
@@ -1034,9 +919,7 @@ def locate(lines: list[str], path) -> tuple[int, int] | None:
 
 def _reindent(chunk: list[str], delta: int) -> list[str]:
     out = [
-        ln
-        if not ln.strip() or delta == 0
-        else (" " * delta + ln if delta > 0 else ln[min(-delta, _ind(ln)) :])
+        ln if not ln.strip() or delta == 0 else (" " * delta + ln if delta > 0 else ln[min(-delta, _ind(ln)) :])
         for ln in chunk
     ]
     if out and not out[-1].endswith("\n"):
@@ -1079,9 +962,7 @@ def insert_setting(merged: str, theirs: str, path: tuple) -> str | None:
     keys = list(t_parent)
     pos = None
     for sibling in reversed(keys[: keys.index(path[-1])]):
-        if sibling in m_parent and (
-            lsib := locate(ml, [str(k) for k in (*parent, sibling)])
-        ):
+        if sibling in m_parent and (lsib := locate(ml, [str(k) for k in (*parent, sibling)])):
             pos = lsib[1]
             break
     if pos is None:
@@ -1089,9 +970,7 @@ def insert_setting(merged: str, theirs: str, path: tuple) -> str | None:
     if pos > 0 and not ml[pos - 1].endswith("\n"):
         ml[pos - 1] += "\n"
     chunk = _reindent(tl[ts:te], child - t_ind)
-    ml[pos:pos] = (
-        ["\n", *chunk] if not parent and pos > 0 and ml[pos - 1].strip() else chunk
-    )
+    ml[pos:pos] = ["\n", *chunk] if not parent and pos > 0 and ml[pos - 1].strip() else chunk
     new = "".join(ml)
     N = safe_yaml(new)[0]
     if _get(N, path) != t_parent[path[-1]] or flatten(_without(N, path)) != flatten(M):
@@ -1109,18 +988,12 @@ def restore_setting(merged: str, base: str, path: tuple) -> str | None:
     ml[lm[0] : lm[1]] = _reindent(bl[lb[0] : lb[1]], _ind(ml[lm[0]]) - _ind(bl[lb[0]]))
     new = "".join(ml)
     N, M, B = safe_yaml(new)[0], safe_yaml(merged)[0], safe_yaml(base)[0]
-    if (
-        N is None
-        or _get(N, path) != _get(B, path)
-        or flatten(_without(N, path)) != flatten(_without(M, path))
-    ):
+    if N is None or _get(N, path) != _get(B, path) or flatten(_without(N, path)) != flatten(_without(M, path)):
         return None
     return new
 
 
-def merge_config(
-    merged: str, base: str, theirs: str, ours: str, keep_defaults: bool
-) -> tuple[str, dict]:
+def merge_config(merged: str, base: str, theirs: str, ours: str, keep_defaults: bool) -> tuple[str, dict]:
     """Add new upstream settings the text merge could not place, optionally keep
     old defaults, and report what changed for the PR."""
     rep: dict = {"added": [], "missing": [], "defaults": [], "kept": [], "unused": []}
@@ -1128,15 +1001,9 @@ def merge_config(
     if not all(isinstance(x, dict) for x in (M, T)):
         return merged, rep
     B = B if isinstance(B, dict) else {}
-    for path in flatten(
-        T
-    ):  # new upstream settings must end up exactly as upstream wrote them
+    for path in flatten(T):  # new upstream settings must end up exactly as upstream wrote them
         # top: where upstream added a key, or turned a plain value into a section
-        top = next(
-            path[:n]
-            for n in range(1, len(path) + 1)
-            if not isinstance(_get(B, path[:n]), dict)
-        )
+        top = next(path[:n] for n in range(1, len(path) + 1) if not isinstance(_get(B, path[:n]), dict))
         if top == path and _get(B, path) is not _MISSING:
             continue  # an existing value: changed defaults are handled below
         if _get(O, top) != _get(B, top) or _get(M, top) == _get(T, top):
@@ -1158,32 +1025,19 @@ def merge_config(
         if _get(M, path) != want and (new := restore_setting(merged, src, path)):
             merged, M = new, safe_yaml(new)[0]
         if _get(M, path) == bv:
-            rep["kept"].append(
-                f"`{key}`: {_fmt(bv)} (upstream default is now {_fmt(tv)})"
-            )
+            rep["kept"].append(f"`{key}`: {_fmt(bv)} (upstream default is now {_fmt(tv)})")
         elif _get(M, path) == tv:
             rep["defaults"].append((key, f"{_fmt(bv)} to {_fmt(tv)}"))
     fm = flatten(M)
-    rep[
-        "unused"
-    ] = [  # set locally, but upstream no longer has this setting (removed or moved)
-        ".".join(map(str, k))
-        for k, val in fo.items()
-        if k in fb and val != fb[k] and k not in ft and k[0] in T
+    rep["unused"] = [  # set locally, but upstream no longer has this setting (removed or moved)
+        ".".join(map(str, k)) for k, val in fo.items() if k in fb and val != fb[k] and k not in ft and k[0] in T
     ]
     for path, tv in ft.items():
         key = ".".join(map(str, path))
         if path not in fb:
             rep["added" if path in fm else "missing"].append(key)
-        elif (
-            path in fm
-            and fm[path] != tv
-            and fm[path] == fo.get(path, _MISSING)
-            and fo.get(path) != fb.get(path)
-        ):
-            rep["kept"].append(
-                f"`{key}`: {_fmt(fm[path])} (upstream default {_fmt(tv)})"
-            )
+        elif path in fm and fm[path] != tv and fm[path] == fo.get(path, _MISSING) and fo.get(path) != fb.get(path):
+            rep["kept"].append(f"`{key}`: {_fmt(fm[path])} (upstream default {_fmt(tv)})")
     return merged, rep
 
 
@@ -1240,11 +1094,7 @@ def _step_blocks(lines: list[str], job: str):
     blocks = []
     for n, s in enumerate(items):
         end = min(_block_end(lines, s), items[n + 1] if n + 1 < len(items) else e)
-        while (
-            s - 1 > i
-            and lines[s - 1].lstrip().startswith("#")
-            and _ind(lines[s - 1]) == ind
-        ):
+        while s - 1 > i and lines[s - 1].lstrip().startswith("#") and _ind(lines[s - 1]) == ind:
             s -= 1
         blocks.append((s, end))
     return blocks, ind, i
@@ -1257,11 +1107,7 @@ def custom_steps(o_doc, b_doc) -> list[tuple]:
         so = _job_steps(o_doc, job)
         if so is not None:
             base_keys = set(_occ_keys(_job_steps(b_doc, job) or []))
-            out += [
-                (job, k, st)
-                for k, st in zip(_occ_keys(so), so, strict=True)
-                if k not in base_keys
-            ]
+            out += [(job, k, st) for k, st in zip(_occ_keys(so), so, strict=True) if k not in base_keys]
     return out
 
 
@@ -1270,11 +1116,7 @@ def step_level_merge(o: str, b: str, t: str, labels) -> str | None:
     merge the rest, put each back after the step it followed (or before the step
     it preceded). None if that does not produce a clean, complete result."""
     O, B = safe_yaml(o)[0], safe_yaml(b)[0]
-    if (
-        not isinstance(O, dict)
-        or not isinstance(B, dict)
-        or not isinstance(O.get("jobs"), dict)
-    ):
+    if not isinstance(O, dict) or not isinstance(B, dict) or not isinstance(O.get("jobs"), dict):
         return None
     lines = o.splitlines(keepends=True)
     removals, groups = [], []
@@ -1359,24 +1201,15 @@ class Plan:
     base: str | None
     base_how: str
     final: Tree
-    changes: dict = dataclasses.field(
-        default_factory=lambda: collections.defaultdict(list)
-    )  # kind -> paths
+    changes: dict = dataclasses.field(default_factory=lambda: collections.defaultdict(list))  # kind -> paths
     todo: list = dataclasses.field(default_factory=list)  # (blocking, text)
     config: dict = dataclasses.field(default_factory=dict)
-    cli: str = ""
     custom_files: list = dataclasses.field(default_factory=list)
     custom_steps: list = dataclasses.field(default_factory=list)  # (file, job, label)
     protected: list = dataclasses.field(default_factory=list)
-    new_uses: set = dataclasses.field(
-        default_factory=set
-    )  # actions the repo did not use before
-    versions: list = dataclasses.field(
-        default_factory=list
-    )  # your action versions replaced by upstream's
-    work: collections.Counter = dataclasses.field(
-        default_factory=collections.Counter
-    )  # kind -> count
+    new_uses: set = dataclasses.field(default_factory=set)  # actions the repo did not use before
+    versions: list = dataclasses.field(default_factory=list)  # your action versions replaced by upstream's
+    work: collections.Counter = dataclasses.field(default_factory=collections.Counter)  # kind -> count
     items: list = dataclasses.field(default_factory=list)  # report rows, see Plan.add
 
     @property
@@ -1411,10 +1244,7 @@ class Plan:
 
     @property
     def work_summary(self) -> str:
-        return ", ".join(
-            f"{n} {WORK_NOUNS[k][n != 1]}"
-            for k, n in sorted(self.work.items(), key=_work_order)
-        )
+        return ", ".join(f"{n} {WORK_NOUNS[k][n != 1]}" for k, n in sorted(self.work.items(), key=_work_order))
 
 
 EFFORTS = ("ready", "check", "quick", "edit", "long", "manual")
@@ -1450,16 +1280,12 @@ def plan_details(plan: Plan) -> dict:
     return {"effort": plan.effort, "work": plan.work_summary, "items": plan.items}
 
 
-def merge_text(
-    ours: str, base: str, theirs: str, labels, keep: str = ""
-) -> tuple[str, int]:
+def merge_text(ours: str, base: str, theirs: str, labels, keep: str = "") -> tuple[str, int]:
     """3-way merge with `git merge-file`. keep='ours' resolves conflicting hunks to the repo's side."""
     with tempfile.TemporaryDirectory() as td:
         files = []
         for name, text in (("ours", ours), ("base", base), ("theirs", theirs)):
-            (Path(td) / name).write_bytes(
-                text.encode()
-            )  # UTF-8 on every OS (not the locale code page)
+            (Path(td) / name).write_bytes(text.encode())  # UTF-8 on every OS (not the locale code page)
             files.append(str(Path(td) / name))
 
         def merge_file(mode: str) -> subprocess.CompletedProcess:
@@ -1470,9 +1296,7 @@ def merge_text(
                 check=False,
             )
 
-        p = merge_file(
-            "--diff3"
-        )  # exit code = number of conflicts; negative or >= 128 is an error
+        p = merge_file("--diff3")  # exit code = number of conflicts; negative or >= 128 is an error
         if not 0 <= p.returncode < 128:
             raise GitError(f"merge-file failed: {p.stderr.decode(errors='replace')}")
         if p.returncode and keep:
@@ -1480,9 +1304,7 @@ def merge_text(
         return p.stdout.decode(errors="replace"), p.returncode
 
 
-USES_LINE_RE = re.compile(
-    r"^(\s*-?\s*uses:\s*['\"]?)([^\s'\"#@]+)@([^\s'\"#]+)(['\"]?)\s*(?:#.*)?$"
-)
+USES_LINE_RE = re.compile(r"^(\s*-?\s*uses:\s*['\"]?)([^\s'\"#@]+)@([^\s'\"#]+)(['\"]?)\s*(?:#.*)?$")
 
 
 def _uses(line: str) -> tuple[str, str] | None:
@@ -1494,7 +1316,8 @@ def _uses(line: str) -> tuple[str, str] | None:
 def take_upstream_versions(merged: str) -> tuple[str, int]:
     """Upstream wins conflicts that are only about action versions: a hunk where your side
     differs from the previous upstream only in the `@ref` of the same actions takes upstream's
-    side. A ref pinned to a commit SHA stays a conflict (re-pin it, don't silently unpin)."""
+    side. Where upstream kept the old version, yours stays (never a downgrade). A ref pinned
+    to a commit SHA stays a conflict (re-pin it, don't silently unpin)."""
     out: list[str] = []
     hunk: list[str] = []
     yours: list[str] = []
@@ -1510,12 +1333,7 @@ def take_upstream_versions(merged: str) -> tuple[str, int]:
             if y == b:
                 continue
             uy, ub = _uses(y), _uses(b)
-            if (
-                not uy
-                or not ub
-                or uy[0] != ub[0]
-                or re.fullmatch(r"[0-9a-f]{40}", uy[1])
-            ):
+            if not uy or not ub or uy[0] != ub[0] or re.fullmatch(r"[0-9a-f]{40}", uy[1]):
                 return False
         return True
 
@@ -1534,7 +1352,7 @@ def take_upstream_versions(merged: str) -> tuple[str, int]:
             side = "upstream"
         elif side == "upstream" and bare.startswith(">>>>>>> "):
             if version_only():
-                out += upstream
+                out += keep_newer_local(yours, base, upstream)
             else:
                 out += hunk
                 conflicts += 1
@@ -1543,6 +1361,21 @@ def take_upstream_versions(merged: str) -> tuple[str, int]:
             {"yours": yours, "base": base, "upstream": upstream}[side].append(ln)
     out += hunk if side else []
     return "".join(out), conflicts + (1 if side else 0)
+
+
+def keep_newer_local(yours: list[str], base: list[str], upstream: list[str]) -> list[str]:
+    """Upstream's lines, but an action upstream did not move off the old version keeps yours."""
+    mine = {}  # action -> (old ref, your ref)
+    for y, b in zip(yours, base):
+        if y != b and (my := USES_LINE_RE.match(y.rstrip("\r\n"))) and (mb := USES_LINE_RE.match(b.rstrip("\r\n"))):
+            mine[my.group(2)] = (mb.group(3), my.group(3))
+    out = []
+    for ln in upstream:
+        m = USES_LINE_RE.match(ln.rstrip("\r\n"))
+        if m and m.group(2) in mine and m.group(3) == mine[m.group(2)][0]:
+            ln = ln[: m.start(3)] + mine[m.group(2)][1] + ln[m.end(3) :]
+        out.append(ln)
+    return out
 
 
 def versions_taken(ours: str, base: str, merged: str) -> list[str]:
@@ -1560,9 +1393,7 @@ def versions_taken(ours: str, base: str, merged: str) -> list[str]:
     for action, mine in sorted(o.items()):
         gone = sorted((mine - b.get(action, set())) - m.get(action, set()))
         if gone and m.get(action):
-            notes.append(
-                f"`{action}`: {', '.join(gone)} to {', '.join(sorted(m[action]))}"
-            )
+            notes.append(f"`{action}`: {', '.join(gone)} to {', '.join(sorted(m[action]))}")
     return notes
 
 
@@ -1603,19 +1434,11 @@ def _conflict_fix(yours: list[str], upstream: list[str]) -> str:
     if uy and uu and uy[0] == uu[0] and re.fullmatch(r"[0-9a-f]{40}", uy[1]):
         action = uy[0].split("uses:", 1)[1].strip(" '\"")
         return f"Upstream moved `{action}` to `{uu[1]}`: pin it to that version's commit SHA, like you did before"
-    while (
-        yours and upstream and yours[0].strip() == upstream[0].strip()
-    ):  # lines both sides share
+    while yours and upstream and yours[0].strip() == upstream[0].strip():  # lines both sides share
         yours, upstream = yours[1:], upstream[1:]
     (y, y_more), (u, u_more) = first(yours), first(upstream)
     key = re.compile(r"^`-?\s*([\w.-]+):")
-    if (
-        y
-        and u
-        and (ky := key.match(y))
-        and (ku := key.match(u))
-        and ky.group(1) == ku.group(1)
-    ):
+    if y and u and (ky := key.match(y)) and (ku := key.match(u)) and ky.group(1) == ku.group(1):
         return f"Pick one value for `{ky.group(1)}`: yours {y} or upstream's {u}"
     if y and u:
         return f"Keep your {y}{y_more} and add upstream's {u}{u_more}"
@@ -1635,11 +1458,7 @@ def find_base(cust: Git, head: str, ours: Tree, up: Upstream) -> tuple[str | Non
             return commit, "shared history"
     # Copied rather than imported: best-matching upstream commit, the oldest on a tie
     # (a too-new base would make upstream changes look like local reverts).
-    pairs = {
-        (p, s)
-        for p, (_, s) in ours.items()
-        if not p.startswith(CLI_DIR) and p != MARKER
-    }
+    pairs = {(p, s) for p, (_, s) in ours.items() if not p.startswith(CLI_DIR) and p != MARKER}
     best, best_commit = 0, None
     for commit in reversed(up.commits):
         score = len(pairs & up.pairs_at(commit))
@@ -1648,13 +1467,9 @@ def find_base(cust: Git, head: str, ours: Tree, up: Upstream) -> tuple[str | Non
     return (best_commit, "inferred") if best_commit else (None, "none")
 
 
-def cli_version(paths) -> tuple:
-    found = [
-        tuple(int(x) for x in m.group(1).split("."))
-        for p in paths
-        if (m := CLI_RE.search(p))
-    ]
-    return max(found) if found else ()
+def is_cli_binary(path: str) -> bool:
+    """Veracode CLI binaries: a job in each repo keeps them current, so this tool never touches them."""
+    return path.startswith(CLI_DIR) and bool(CLI_RE.search(path))
 
 
 def is_workflow(path: str) -> bool:
@@ -1684,13 +1499,7 @@ def merge_repo(
     def take_upstream(path):
         final[path] = (theirs[path][0], cust.write_blob(up.blob(theirs[path][1])))
 
-    o_cli = {p for p in ours if p.startswith(CLI_DIR) and CLI_RE.search(p)}
-    t_cli = {p for p in theirs if p.startswith(CLI_DIR) and CLI_RE.search(p)}
-    _update_cli(plan, o_cli, t_cli, ours, theirs, take_upstream)
-
-    for path in sorted(
-        (set(ours) | set(theirs) | set(base)) - o_cli - t_cli - {MARKER}
-    ):
+    for path in sorted(p for p in set(ours) | set(theirs) | set(base) if p != MARKER and not is_cli_binary(p)):
         O, B, T = ours.get(path), base.get(path), theirs.get(path)
         o, b, t = (e[1] if e else None for e in (O, B, T))
         if o == t or b == t:  # nothing to do, or upstream did not change it
@@ -1698,11 +1507,7 @@ def merge_repo(
         if kept(path):
             plan.changes["protected-changed"].append(path)
             continue
-        if (
-            b is not None
-            and o == b
-            and not (path == CONFIG_FILE and args.keep_defaults)
-        ):
+        if b is not None and o == b and not (path == CONFIG_FILE and args.keep_defaults):
             if T:  # never changed locally: take upstream as is
                 take_upstream(path)
                 plan.changes["updated"].append(path)
@@ -1722,13 +1527,8 @@ def merge_repo(
             continue
 
         o_text, t_text, b_text = cust.text(O), up.text(T), up.text(B)
-        if (
-            Path(path).suffix.lower() in BINARY_EXT
-            or "\0" in o_text[:8000] + t_text[:8000]
-        ):
-            take_upstream(
-                path
-            )  # binaries cannot be merged: upstream wins and the PR says so
+        if Path(path).suffix.lower() in BINARY_EXT or "\0" in o_text[:8000] + t_text[:8000]:
+            take_upstream(path)  # binaries cannot be merged: upstream wins and the PR says so
             plan.changes["updated"].append(path)
             plan.add(
                 False,
@@ -1742,35 +1542,23 @@ def merge_repo(
         merged, conflicts = merge_text(o_text, b_text, t_text, labels)
         if conflicts and path.endswith((".yml", ".yaml")):
             merged, conflicts = take_upstream_versions(merged)
-        if (
-            conflicts
-            and is_workflow(path)
-            and (resolved := step_level_merge(o_text, b_text, t_text, labels))
-        ):
+        if conflicts and is_workflow(path) and (resolved := step_level_merge(o_text, b_text, t_text, labels)):
             merged, conflicts = resolved, 0
-        plan.versions += [
-            f"{x} in `{path}`" for x in versions_taken(o_text, b_text, merged)
-        ]
+        plan.versions += [f"{x} in `{path}`" for x in versions_taken(o_text, b_text, merged)]
         if path == CONFIG_FILE:
             if conflicts:  # the repo's settings win; fall back to markers only if that breaks the file
                 ours_wins = merge_text(o_text, b_text, t_text, labels, keep="ours")[0]
                 if not safe_yaml(ours_wins)[1]:
                     merged, conflicts = ours_wins, 0
             if not conflicts:
-                merged, plan.config = merge_config(
-                    merged, b_text, t_text, o_text, args.keep_defaults
-                )
+                merged, plan.config = merge_config(merged, b_text, t_text, o_text, args.keep_defaults)
         if merged == o_text:
             continue
         final[path] = (O[0], cust.write_blob(merged.encode()))
         if conflicts:
             hunks = conflict_hunks(merged)
             lines = [h["line"] for h in hunks]
-            where = (
-                f" (line{'s' if len(lines) > 1 else ''} {', '.join(map(str, lines))})"
-                if lines
-                else ""
-            )
+            where = f" (line{'s' if len(lines) > 1 else ''} {', '.join(map(str, lines))})" if lines else ""
             count = "the conflict" if len(lines) <= 1 else f"{len(lines)} conflicts"
             rows = [
                 {
@@ -1793,9 +1581,7 @@ def merge_repo(
 
     _check(plan, cust, up, ours, base)
     plan.custom_files = sorted(
-        p
-        for p in ours
-        if p not in base and p not in theirs and p != MARKER and p not in o_cli
+        p for p in ours if p not in base and p not in theirs and p != MARKER and not is_cli_binary(p)
     )
     plan.protected = sorted(p for p in ours if kept(p))
     structure_check(plan, cust, up, ours)
@@ -1811,34 +1597,13 @@ def _per_file_bases(cust: Git, up: Upstream, ours: Tree, base: Tree) -> Tree:
         if (
             path in up.tree
             and path != MARKER
-            and not CLI_RE.search(path)
+            and not is_cli_binary(path)
             and Path(path).suffix.lower() not in BINARY_EXT
             and sha != base.get(path, ("", ""))[1]
-            and (
-                better := up.closest_version(
-                    path, cust.text(ours[path]), base.get(path, ("", None))[1]
-                )
-            )
+            and (better := up.closest_version(path, cust.text(ours[path]), base.get(path, ("", None))[1]))
         ):
             out[path] = (mode, better)
     return out
-
-
-def _update_cli(
-    plan: Plan, o_cli: set, t_cli: set, ours: Tree, theirs: Tree, take_upstream
-) -> None:
-    """Veracode CLI binaries are never merged: the newer version wins."""
-    ov, tv = cli_version(o_cli), cli_version(t_cli)
-    if tv <= ov:
-        return
-    for p in o_cli - t_cli:
-        del plan.final[p]
-    for p in t_cli:
-        if ours.get(p, ("", ""))[1] != theirs[p][1]:
-            take_upstream(p)
-    plan.cli = (
-        f"Veracode CLI {'.'.join(map(str, ov)) or 'none'} to {'.'.join(map(str, tv))}"
-    )
 
 
 def _check(plan: Plan, cust: Git, up: Upstream, ours: Tree, base: Tree) -> None:
@@ -1852,26 +1617,15 @@ def _check_changed_yaml(plan: Plan, cust: Git, ours: Tree) -> None:
     """Every changed YAML file parses (no duplicate keys); collect actions new to the repo."""
     final, conflicted = plan.final, set(plan.changes["conflict"])
     used_before = {
-        u.split("@")[0].lower()
-        for p, e in ours.items()
-        if is_workflow(p)
-        for u in USES_RE.findall(cust.text(e))
+        u.split("@")[0].lower() for p, e in ours.items() if is_workflow(p) for u in USES_RE.findall(cust.text(e))
     }
-    for path in sorted(
-        p
-        for p, e in final.items()
-        if ours.get(p) != e and p.endswith((".yml", ".yaml"))
-    ):
+    for path in sorted(p for p, e in final.items() if ours.get(p) != e and p.endswith((".yml", ".yaml"))):
         text = cust.text(final[path])
         if path not in conflicted:
             err = safe_yaml(text)[1]
             if err:
-                before = (
-                    safe_yaml(cust.text(ours.get(path)))[1] if path in ours else None
-                )
-                dup = re.search(
-                    r"duplicate key '([^']+)' \(lines (\d+) and (\d+)\)", err
-                )
+                before = safe_yaml(cust.text(ours.get(path)))[1] if path in ours else None
+                dup = re.search(r"duplicate key '([^']+)' \(lines (\d+) and (\d+)\)", err)
                 if before:
                     plan.add(
                         False,
@@ -1903,8 +1657,7 @@ def _check_changed_yaml(plan: Plan, cust: Git, ours: Tree) -> None:
             plan.new_uses |= {
                 u
                 for u in USES_RE.findall(text)
-                if not u.startswith(("./", "docker://"))
-                and u.split("@")[0].lower() not in used_before
+                if not u.startswith(("./", "docker://")) and u.split("@")[0].lower() not in used_before
             }
 
 
@@ -1939,9 +1692,7 @@ def _config_todos(plan: Plan) -> None:
         )
 
 
-def _check_custom_steps(
-    plan: Plan, cust: Git, up: Upstream, ours: Tree, base: Tree
-) -> None:
+def _check_custom_steps(plan: Plan, cust: Git, up: Upstream, ours: Tree, base: Tree) -> None:
     """Custom steps are still in their job, and edits next to reshaped upstream steps get a check."""
     final, conflicted = plan.final, set(plan.changes["conflict"])
     for path in sorted(p for p in ours if is_workflow(p) and p in base and p in final):
@@ -1955,11 +1706,7 @@ def _check_custom_steps(
                 continue
             if k[0] in {_step_key(s) for s in _job_steps(F, job) or []}:
                 continue
-            elsewhere = [
-                j
-                for j in (F.get("jobs") or {})
-                if k[0] in {_step_key(s) for s in _job_steps(F, j) or []}
-            ]
+            elsewhere = [j for j in (F.get("jobs") or {}) if k[0] in {_step_key(s) for s in _job_steps(F, j) or []}]
             where = f"is now in job `{elsewhere[0]}`" if elsewhere else "is missing"
             loc = locate(
                 cust.text(final[path]).splitlines(),
@@ -1979,11 +1726,7 @@ def _check_custom_steps(
                     else f"Add your step `{label}` back to job `{job}` (upstream reshaped it)"
                 ),
             )
-        if (
-            F is not None
-            and path in up.tree
-            and not any(f"`{path}`" in t for b, t in plan.todo if b)
-        ):
+        if F is not None and path in up.tree and not any(f"`{path}`" in t for b, t in plan.todo if b):
             for what, why in reshaped_edits(O, B, safe_yaml(up.text(up.tree[path]))[0]):
                 plan.add(
                     True,
@@ -1997,19 +1740,12 @@ def _check_custom_steps(
 
 def _jobs(doc) -> dict:
     jobs = doc.get("jobs") if isinstance(doc, dict) else None
-    return (
-        {j: s for j in jobs if (s := _job_steps(doc, j)) is not None}
-        if isinstance(jobs, dict)
-        else {}
-    )
+    return {j: s for j in jobs if (s := _job_steps(doc, j)) is not None} if isinstance(jobs, dict) else {}
 
 
 def _loose_keys(steps) -> list[tuple]:
     """Occurrence keys that ignore case and spacing, so `set version` to `Set version` is no change."""
-    return [
-        ((kind, " ".join(str(val).lower().split())), n)
-        for (kind, val), n in _occ_keys(steps)
-    ]
+    return [((kind, " ".join(str(val).lower().split())), n) for (kind, val), n in _occ_keys(steps)]
 
 
 def reshaped_edits(O, B, T) -> list[tuple[str, str]]:
@@ -2019,14 +1755,10 @@ def reshaped_edits(O, B, T) -> list[tuple[str, str]]:
     b_jobs, t_jobs = _jobs(B), _jobs(T)
     for job, so in _jobs(O).items():
         sb, st = b_jobs.get(job), t_jobs.get(job)
-        if (
-            sb is None or so == sb or st == sb
-        ):  # custom job, unchanged locally, or by upstream
+        if sb is None or so == sb or st == sb:  # custom job, unchanged locally, or by upstream
             continue
         if st is None:
-            out.append(
-                (f"your changes to job `{job}`", "upstream renamed or removed this job")
-            )
+            out.append((f"your changes to job `{job}`", "upstream renamed or removed this job"))
             continue
         okeys, bkeys, tkeys = (_loose_keys(x) for x in (so, sb, st))
         for i, (k, step) in enumerate(zip(okeys, so, strict=True)):
@@ -2044,8 +1776,7 @@ def reshaped_edits(O, B, T) -> list[tuple[str, str]]:
             moved = any(x is not None and x not in tkeys for x in (prev, nxt)) or (
                 prev in tkeys
                 and nxt in tkeys
-                and tkeys.index(nxt) - tkeys.index(prev)
-                != bkeys.index(nxt) - bkeys.index(prev)
+                and tkeys.index(nxt) - tkeys.index(prev) != bkeys.index(nxt) - bkeys.index(prev)
             )
             if moved:
                 out.append(
@@ -2065,26 +1796,19 @@ def verify(plan: Plan, cust: Git, up: Upstream, ours: Tree, base: Tree) -> None:
     """Last check before anything is pushed. These must hold whatever the merge did;
     if one fails it is a bug, so the repo gets no pull request."""
     final, conflicted, bad = plan.final, set(plan.changes["conflict"]), []
+    bad += [f"`{p}` would change" for p in plan.protected + plan.custom_files if final.get(p) != ours[p]]
+    cli = {p for p in set(ours) | set(final) if is_cli_binary(p)}
     bad += [
-        f"`{p}` would change"
-        for p in plan.protected + plan.custom_files
-        if final.get(p) != ours[p]
+        f"`{p}` would change (CLI binaries are left to the repo's own job)" for p in cli if final.get(p) != ours.get(p)
     ]
     for p, e in ours.items():
-        if p not in final and p != MARKER and not CLI_RE.search(p) and e != base.get(p):
+        if p not in final and p != MARKER and not is_cli_binary(p) and e != base.get(p):
             bad.append(f"`{p}` would be deleted although you changed it")
     marker = re.compile(r"^(<<<<<<<|>>>>>>>) ", re.MULTILINE)
     for p, e in final.items():
-        if (
-            e == ours.get(p)
-            or p in conflicted
-            or p.startswith(CLI_DIR)
-            or Path(p).suffix.lower() in BINARY_EXT
-        ):
+        if e == ours.get(p) or p in conflicted or is_cli_binary(p) or Path(p).suffix.lower() in BINARY_EXT:
             continue
-        if marker.search(cust.text(e)) and not marker.search(
-            cust.text(ours.get(p)) + up.text(up.tree.get(p))
-        ):
+        if marker.search(cust.text(e)) and not marker.search(cust.text(ours.get(p)) + up.text(up.tree.get(p))):
             bad.append(f"`{p}` would contain conflict markers")
     if CONFIG_FILE in ours and CONFIG_FILE in final and CONFIG_FILE not in conflicted:
         O, F = (
@@ -2098,13 +1822,9 @@ def verify(plan: Plan, cust: Git, up: Upstream, ours: Tree, base: Tree) -> None:
             for k, val in flatten(O).items():
                 if fb.get(k, _MISSING) != val and ff.get(k, _MISSING) != val:
                     why = (
-                        ""
-                        if isinstance(T, dict) and k[0] in T
-                        else f" (upstream renamed or removed section `{k[0]}`)"
+                        "" if isinstance(T, dict) and k[0] in T else f" (upstream renamed or removed section `{k[0]}`)"
                     )
-                    bad.append(
-                        f"`{CONFIG_FILE}` would lose your value for `{'.'.join(map(str, k))}`{why}"
-                    )
+                    bad.append(f"`{CONFIG_FILE}` would lose your value for `{'.'.join(map(str, k))}`{why}")
     if bad:
         raise SafetyError("safety check failed, nothing pushed: " + "; ".join(bad[:5]))
 
@@ -2113,9 +1833,7 @@ def verify(plan: Plan, cust: Git, up: Upstream, ours: Tree, base: Tree) -> None:
 # Pull request
 # --------------------------------------------------------------------------- #
 DRAFT_NOTE = " This pull request is a draft until then."
-NOT_DRAFT_NOTE = (
-    " Do not merge until then (this repository does not support draft pull requests)."
-)
+NOT_DRAFT_NOTE = " Do not merge until then (this repository does not support draft pull requests)."
 CONFLICT_HELP = [
     "1. Open **Files changed** and edit the file (or edit it on this branch).",
     (
@@ -2129,11 +1847,7 @@ CONFLICT_HELP = [
 def _details(title: str, rows: list[str]) -> list[str]:
     while rows and not rows[-1]:
         rows = rows[:-1]
-    return (
-        [f"<details><summary>{title}</summary>", "", *rows, "", "</details>", ""]
-        if rows
-        else []
-    )
+    return [f"<details><summary>{title}</summary>", "", *rows, "", "</details>", ""] if rows else []
 
 
 def _n(count: int, word: str) -> str:
@@ -2148,9 +1862,7 @@ def pr_body(plan: Plan, up: Upstream) -> str:
         parts = ([f"{_n(conflicts, 'conflict')} to resolve"] if conflicts else []) + (
             [f"{_n(others, 'item')} to check"] if others else []
         )
-        status = f"**Action required:** {' and '.join(parts)}." + (
-            DRAFT_NOTE if plan.blocking else ""
-        )
+        status = f"**Action required:** {' and '.join(parts)}." + (DRAFT_NOTE if plan.blocking else "")
     elif ch["merged"]:
         status = "**No action needed.** Your customizations are kept. Review and merge when ready."
     else:
@@ -2175,20 +1887,12 @@ def pr_body(plan: Plan, up: Upstream) -> str:
         )
         if x
     ]
-    summary = (
-        ", ".join(kept[:-1]) + (" and " if len(kept) > 1 else "") + kept[-1]
-        if kept
-        else ""
-    )
+    summary = ", ".join(kept[:-1]) + (" and " if len(kept) > 1 else "") + kept[-1] if kept else ""
     lines += [
         "### Your customizations",
         "",
         (f"Kept: {summary}." if summary else "No customizations found.")
-        + (
-            f" {', '.join(f'`{p}`' for p in plan.protected)} not modified."
-            if plan.protected
-            else ""
-        ),
+        + (f" {', '.join(f'`{p}`' for p in plan.protected)} not modified." if plan.protected else ""),
         "",
     ]
     rows = []
@@ -2196,10 +1900,7 @@ def pr_body(plan: Plan, up: Upstream) -> str:
         ("Custom files", [f"`{p}`" for p in plan.custom_files]),
         (
             "Custom steps",
-            [
-                f"`{lbl}` in `{p.rsplit('/', 1)[-1]}`, job `{job}`"
-                for p, job, lbl in plan.custom_steps
-            ],
+            [f"`{lbl}` in `{p.rsplit('/', 1)[-1]}`, job `{job}`" for p, job, lbl in plan.custom_steps],
         ),
         (f"`{CONFIG_FILE}` settings", cfg_kept),
         (
@@ -2223,19 +1924,14 @@ def pr_body(plan: Plan, up: Upstream) -> str:
 
     counts = [f"{len(ch[k])} {k}" for k in ("updated", "added", "removed") if ch[k]]
     if counts:
-        counts[0] = counts[0].replace(
-            " ", " file " if counts[0].startswith("1 ") else " files ", 1
-        )
+        counts[0] = counts[0].replace(" ", " file " if counts[0].startswith("1 ") else " files ", 1)
     summary_bits = [
         x
         for x in (
-            plan.cli,
             ", ".join(counts),
             ch["merged"] and f"{_n(len(ch['merged']), 'customized file')} updated",
-            plan.versions
-            and f"{_n(len(plan.versions), 'action version')} taken from upstream",
-            plan.config.get("added")
-            and _n(len(plan.config["added"]), f"new `{CONFIG_FILE}` setting"),
+            plan.versions and f"{_n(len(plan.versions), 'action version')} taken from upstream",
+            plan.config.get("added") and _n(len(plan.config["added"]), f"new `{CONFIG_FILE}` setting"),
         )
         if x
     ]
@@ -2259,9 +1955,7 @@ def pr_body(plan: Plan, up: Upstream) -> str:
     web = up.web_url()
     source = f"[{up.sha[:7]}]({web}/commit/{up.sha})" if web else f"`{up.sha[:7]}`"
     base = f"`{(plan.base or 'none')[:7]}` ({plan.base_how})"
-    lines.append(
-        f"<sub>Upstream {source}, base {base}. veracode-upstream-sync {__version__}.</sub>"
-    )
+    lines.append(f"<sub>Upstream {source}, base {base}. veracode-upstream-sync {__version__}.</sub>")
     return "\n".join(lines)[:60000]
 
 
@@ -2272,9 +1966,7 @@ def has_trailer(message: str) -> bool:
 def tool_only(gh: GitHub, full: str, base: str, head: str) -> bool:
     """True when every commit on `head` not in `base` was made by this tool."""
     q = urllib.parse.quote
-    cmp = gh.get(
-        f"/repos/{full}/compare/{q(base, safe='')}...{q(head, safe='')}", ok404=True
-    )
+    cmp = gh.get(f"/repos/{full}/compare/{q(base, safe='')}...{q(head, safe='')}", ok404=True)
     if not cmp:
         return False
     commits = cmp.get("commits") or []
@@ -2300,11 +1992,7 @@ def create_pr(gh: GitHub, full: str, owner: str, payload: dict) -> dict:
                     return pr
                 gh.limiter.sleep(2 ** (attempt + 1))
                 continue
-            if (
-                e.status == 422
-                and "already exists" in str(e).lower()
-                and (pr := existing())
-            ):  # concurrent run
+            if e.status == 422 and "already exists" in str(e).lower() and (pr := existing()):  # concurrent run
                 return pr
             if e.status == 422 and payload.get("draft") and "draft" in str(e).lower():
                 payload = {**payload, "draft": False}  # plan without draft PRs
@@ -2321,9 +2009,7 @@ class Result:
     pr: str = ""
     effort: str = ""  # see Plan.effort; "manual" when no PR could be opened
     work: str = ""
-    details: dict = dataclasses.field(
-        default_factory=dict
-    )  # plan_details(), for the report
+    details: dict = dataclasses.field(default_factory=dict)  # plan_details(), for the report
 
 
 def sync_repo(
@@ -2346,9 +2032,7 @@ def sync_repo(
         if p["head"]["ref"].startswith(args.branch_prefix + "/")
         and (p["head"].get("repo") or {}).get("full_name") == full
     ]
-    if not args.dry_run and (
-        done := _already_handled(gh, full, owner, branch, open_prs, args.force)
-    ):
+    if not args.dry_run and (done := _already_handled(gh, full, owner, branch, open_prs, args.force)):
         return done
 
     clone_url = repo["clone_url"]
@@ -2375,10 +2059,18 @@ def sync_repo(
                 f"already has upstream changes newer than {up.ref}; nothing to do",
             )
         plan = merge_repo(cust, up, ours, base_commit, how, args)
-        if {p: e for p, e in plan.final.items() if p != MARKER} == {
-            p: e for p, e in ours.items() if p != MARKER
-        }:
+        if {p: e for p, e in plan.final.items() if p != MARKER} == {p: e for p, e in ours.items() if p != MARKER}:
             return Result(full, "up-to-date", f"base: {how}")
+        # merged before, yet the repo does not have it: someone undid it (--revert, GitHub's Revert button, by hand)
+        undone = (
+            []
+            if args.force or args.dry_run
+            else [p for p in _closed_prs(gh, full, owner, branch) if p.get("merged_at")]
+        )
+        if undone:
+            return Result(
+                full, "skipped", "this update was reverted (use --force to apply it again)", undone[0]["html_url"]
+            )
         check_settings(gh, full, plan, cust, ours)
         marker = {
             "upstream": up.url,
@@ -2391,9 +2083,7 @@ def sync_repo(
             cust.write_blob((json.dumps(marker, indent=2) + "\n").encode()),
         )
         details = plan_details(plan)
-        tag = json.dumps(details).replace(
-            "--", "\\u002d\\u002d"
-        )  # never ends the HTML comment early
+        tag = json.dumps(details).replace("--", "\\u002d\\u002d")  # never ends the HTML comment early
         body = pr_body(plan, up) + f"\n{EFFORT_TAG}{tag} -->"
         state = "needs work" if plan.blocking else ("check" if plan.todo else "ready")
         effort: dict = {
@@ -2405,23 +2095,204 @@ def sync_repo(
             out = Path(args.out_dir)
             out.mkdir(parents=True, exist_ok=True)
             commit = cust.commit(plan.final, head, "dry run", author)
-            patch = cust.run("diff", head, commit, "--", ".", f":(exclude){CLI_DIR}")
+            patch = cust.run("diff", head, commit)
             (out / f"{owner}__{name}.patch").write_text(patch, encoding="utf-8")
             (out / f"{owner}__{name}.md").write_text(body, encoding="utf-8")
-            return Result(
-                full, "dry-run", f"{state}, see {out}/{owner}__{name}.md", **effort
-            )
+            return Result(full, "dry-run", f"{state}, see {out}/{owner}__{name}.md", **effort)
 
         message = f"Sync Veracode integration with upstream {up.sha[:10]}\n\n"
         message += f"Upstream: {up.url} @ {up.sha}\n\n{TRAILER}: {up.sha}\n"
         commit = cust.commit(plan.final, head, message, author)
         if refused := _push_branch(gh, cust, full, default, branch, commit, clone_url):
             return refused
-        pr = _open_pr(gh, full, owner, default, branch, plan, body, up, args)
+        title = f"{args.title}{': action required' if plan.todo else ''} ({up.sha[:7]})"
+        pr = _open_pr(gh, full, owner, default, branch, plan, body, title, args)
         _close_superseded(gh, full, default, open_prs, up)
         return Result(full, "pr-created", state, pr["html_url"], **effort)
     finally:
         shutil.rmtree(cust.path, ignore_errors=True)
+
+
+def revert_repo(gh: GitHub, repo: dict, args: argparse.Namespace, author: tuple[str, str], workdir: Path) -> Result:
+    """Undo the last update: close an open update PR, or open a PR that reverts the last merged one.
+    Only that update's changes are undone; later changes to the same files are kept."""
+    full, default = repo["full_name"], repo["default_branch"]
+    owner, name = full.split("/")
+    if skip := _precheck(repo, f"{args.branch_prefix}-revert/", args):  # archived, no push access, host
+        return skip
+    mine = [
+        p
+        for p in gh.paginate(f"/repos/{full}/pulls?state=all")
+        if p["head"]["ref"].startswith(args.branch_prefix + "/")
+        and (p["head"].get("repo") or {}).get("full_name") == full
+    ]
+    if open_prs := [p for p in mine if p["state"] == "open"]:
+        nums = ", ".join(f"#{p['number']}" for p in open_prs)
+        if args.dry_run:
+            return Result(
+                full, "dry-run", f"would close the open update PR {nums} (not merged)", open_prs[0]["html_url"]
+            )
+        for p in open_prs:  # closed without merging: later runs treat it as declined
+            gh.req("PATCH", f"/repos/{full}/pulls/{p['number']}", {"state": "closed"})
+            if tool_only(gh, full, default, p["head"]["ref"]):
+                ref = urllib.parse.quote(p["head"]["ref"])
+                _best_effort(
+                    f"{full}: delete branch",
+                    lambda ref=ref: gh.req("DELETE", f"/repos/{full}/git/refs/heads/{ref}", ok404=True),
+                )
+        return Result(full, "reverted", f"closed the open update PR {nums}, it was not merged", open_prs[0]["html_url"])
+    merged = sorted((p for p in mine if p.get("merged_at")), key=lambda p: (p["merged_at"], p["number"]))
+    if not merged:
+        return Result(full, "skipped", "nothing to revert: no merged update PR")
+    pr = merged[-1]
+    branch = revert_branch(pr["head"]["ref"])
+    q = urllib.parse.quote(f"{owner}:{branch}", safe=":")
+    for p in gh.get(f"/repos/{full}/pulls?state=all&head={q}") or []:
+        if p.get("state") == "open":
+            return Result(full, "pr-exists", "revert already open", p["html_url"], **_pr_effort(p))
+        if (p.get("merged_at") or "") > pr["merged_at"]:
+            return Result(full, "skipped", f"already reverted (#{pr['number']})", p["html_url"])
+
+    clone_url = repo["clone_url"]
+    cust = clone(clone_url, workdir / f"{owner}__{name}.git", git_env(gh.token, clone_url), branch=default)
+    try:
+        head = cust.rev("HEAD")
+        cust.run("fetch", "--quiet", "origin", f"+refs/pull/{pr['number']}/head:refs/vsync/update")
+        after = cust.rev("refs/vsync/update")
+        # What the update changed: its head against the default branch it was based on. The commit
+        # before the merge (merge commit, squash, rebase) or, for a fast-forward, the update's first parent.
+        merge = pr.get("merge_commit_sha")
+        anchor: str | None
+        if merge and merge != after:
+            anchor = cust.rev(f"{merge}^1")
+        else:
+            commits = gh.get(f"/repos/{full}/pulls/{pr['number']}/commits?per_page=250") or []
+            anchor = (commits[0].get("parents") or [{}])[0].get("sha") if commits else None
+            if not anchor:
+                raise GitError(f"cannot tell what #{pr['number']} changed; revert it by hand")
+        before = cust.run("merge-base", after, anchor).strip()
+        plan = revert_plan(cust, cust.ls_tree(head), cust.ls_tree(after), cust.ls_tree(before))
+        if plan.final == cust.ls_tree(head):
+            return Result(full, "skipped", f"nothing to revert: files already match the state before #{pr['number']}")
+        sha = pr["head"]["ref"].rsplit("/", 1)[-1]
+        details = plan_details(plan)
+        tag = json.dumps(details).replace("--", "\\u002d\\u002d")
+        body = revert_body(plan, pr, sha) + f"\n{EFFORT_TAG}{tag} -->"
+        state = "needs work" if plan.blocking else "ready"
+        effort: dict = {"effort": plan.effort, "work": plan.work_summary, "details": details}
+        if args.dry_run:
+            out = Path(args.out_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            commit = cust.commit(plan.final, head, "dry run", author)
+            (out / f"{owner}__{name}.revert.patch").write_text(cust.run("diff", head, commit), encoding="utf-8")
+            (out / f"{owner}__{name}.revert.md").write_text(body, encoding="utf-8")
+            return Result(full, "dry-run", f"revert {state}, see {out}/{owner}__{name}.revert.md", **effort)
+        message = f"Revert Veracode integration update {sha}\n\nReverts #{pr['number']}.\n\n{TRAILER}: revert {sha}\n"
+        commit = cust.commit(plan.final, head, message, author)
+        if refused := _push_branch(gh, cust, full, default, branch, commit, clone_url):
+            return refused
+        title = f"Revert: {pr['title']}"
+        new = _open_pr(gh, full, owner, default, branch, plan, body, title, args, extra_labels=("revert",))
+        return Result(full, "pr-created", f"revert {state}", new["html_url"], **effort)
+    finally:
+        shutil.rmtree(cust.path, ignore_errors=True)
+
+
+def revert_plan(cust: Git, ours: Tree, after: Tree, before: Tree) -> Plan:
+    """Undo after->before on the current files with a 3-way merge per file."""
+    plan = Plan(None, "revert", dict(ours))
+    labels = ("current", "after the update", "before the update")
+    for path in sorted(p for p in set(after) | set(before) if not is_cli_binary(p)):  # CLI: the repo's job
+        a, b, o = after.get(path), before.get(path), ours.get(path)
+        if a == b or o == b:
+            continue  # not part of the update, or already reverted
+        if o == a:  # unchanged since the update
+            if b is None:
+                del plan.final[path]
+                plan.changes["removed"].append(path)
+            else:
+                plan.final[path] = b
+                plan.changes["added" if a is None else "updated"].append(path)
+            continue
+        texts = [cust.text(x) if x else "" for x in (o, a, b)]
+        if (
+            o is None
+            or a is None
+            or b is None
+            or Path(path).suffix.lower() in BINARY_EXT
+            or any("\0" in t[:8000] for t in texts)
+        ):
+            plan.add(
+                True,
+                f"`{path}` changed since the update: revert it by hand",
+                "conflict",
+                action="Revert file by hand",
+                where=path,
+                details="It changed after the update, so it was left as it is now",
+            )
+            continue
+        merged, conflicts = merge_text(texts[0], texts[1], texts[2], labels)
+        plan.final[path] = (o[0], cust.write_blob(merged.encode()))
+        if conflicts:
+            rows = [
+                {"action": "Resolve merge conflict", "where": f"{path} line {h['line']}", "details": h["fix"]}
+                for h in conflict_hunks(merged)
+            ]
+            plan.add(True, f"Resolve {_n(len(rows), 'conflict')} in `{path}`", "conflict", max(1, len(rows)), rows=rows)
+            plan.changes["conflict"].append(path)
+        else:
+            plan.changes["merged"].append(path)
+            if path.endswith((".yml", ".yaml")) and (err := safe_yaml(merged)[1]) and not safe_yaml(texts[0])[1]:
+                plan.add(
+                    True,
+                    f"Fix the YAML in `{path}`: {err}",
+                    "yaml",
+                    action="Fix YAML",
+                    where=path,
+                    details=f"Fix the YAML error: {err}",
+                )
+    return plan
+
+
+def revert_body(plan: Plan, pr: dict, sha: str) -> str:
+    ch = plan.changes
+    lines = [
+        (
+            f"Reverts #{pr['number']} (upstream `{sha[:7]}`): the files go back to how they were before that "
+            "update. Changes made after it are kept."
+        ),
+        "",
+    ]
+    if plan.todo:
+        lines += [f"**Action required:** {_n(len(plan.todo), 'item')} to fix before merging.{DRAFT_NOTE}", ""]
+        lines += ["### To do", "", *(f"- [ ] {text}" for _, text in plan.todo), ""]
+        if ch["conflict"]:
+            lines += [
+                (
+                    "In each conflict, `current` is the file now and `before the update` is what it goes back to. "
+                    "Keep the lines you need and delete the marker lines."
+                ),
+                "",
+            ]
+    rows = []
+    for title, key in (
+        ("Restored", "updated"),
+        ("Restored, merged with later changes", "merged"),
+        ("Conflicts", "conflict"),
+        ("Removed (added by the update)", "removed"),
+        ("Re-added (removed by the update)", "added"),
+    ):
+        if ch[key]:
+            rows += [f"**{title}**", *(f"- `{p}`" for p in ch[key]), ""]
+    lines += _details("Files", rows)
+    lines += [
+        (
+            "Later runs skip this upstream version for this repo. A newer upstream release opens a new update "
+            "PR; to apply this one again, run with `--force`."
+        ),
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def _precheck(repo: dict, branch: str, args: argparse.Namespace) -> Result | None:
@@ -2433,10 +2304,7 @@ def _precheck(repo: dict, branch: str, args: argparse.Namespace) -> Result | Non
     if not args.dry_run and not (repo.get("permissions") or {}).get("push"):
         return Result(full, "skipped", "token has no push access")
     clone_url = repo["clone_url"]
-    if (
-        clone_url.startswith("https://")
-        and urllib.parse.urlsplit(clone_url).netloc != args.git_host
-    ):
+    if clone_url.startswith("https://") and urllib.parse.urlsplit(clone_url).netloc != args.git_host:
         return Result(
             full,
             "error",
@@ -2450,9 +2318,7 @@ EFFORT_TAG = "<!-- veracode-upstream-sync effort: "
 
 def _pr_effort(pr: dict) -> dict:
     """Effort and details recorded in an open sync PR. A draft a person marked ready counts as ready."""
-    m = re.search(
-        re.escape(EFFORT_TAG) + r"(\{.*\}) -->", pr.get("body") or "", re.DOTALL
-    )
+    m = re.search(re.escape(EFFORT_TAG) + r"(\{.*\}) -->", pr.get("body") or "", re.DOTALL)
     with suppress(ValueError, TypeError, AttributeError):
         data = json.loads(m.group(1)) if m else {}
         effort, work = str(data.get("effort", "")), str(data.get("work", ""))
@@ -2466,9 +2332,7 @@ def _pr_effort(pr: dict) -> dict:
     return {}
 
 
-def _already_handled(
-    gh: GitHub, full: str, owner: str, branch: str, open_prs: list, force: bool
-) -> Result | None:
+def _already_handled(gh: GitHub, full: str, owner: str, branch: str, open_prs: list, force: bool) -> Result | None:
     """A PR for this upstream commit is open, or it was closed without merging (declined)."""
     same = [p for p in open_prs if p["head"]["ref"] == branch]
     if same:
@@ -2480,12 +2344,11 @@ def _already_handled(
             **_pr_effort(same[0]),
         )
     if not force:
-        q = urllib.parse.quote(f"{owner}:{branch}", safe=":")
+        closed = _closed_prs(gh, full, owner, branch)
         declined = [
             p
-            for p in gh.get(f"/repos/{full}/pulls?state=closed&head={q}") or []
-            if not p.get("merged_at")
-            and "superseded" not in {lb["name"] for lb in p.get("labels", [])}
+            for p in closed
+            if not p.get("merged_at") and "superseded" not in {lb["name"] for lb in p.get("labels", [])}
         ]
         if declined:
             return Result(
@@ -2495,6 +2358,18 @@ def _already_handled(
                 declined[0]["html_url"],
             )
     return None
+
+
+def _closed_prs(gh: GitHub, full: str, owner: str, branch: str) -> list:
+    q = urllib.parse.quote(f"{owner}:{branch}", safe=":")
+    return gh.get(f"/repos/{full}/pulls?state=closed&head={q}") or []
+
+
+def revert_branch(sync_branch: str) -> str:
+    """veracode-upstream-sync/<sha> -> veracode-upstream-sync-revert/<sha>: outside the sync
+    prefix, so sync runs never treat a revert PR as an older update to close."""
+    prefix, sha = sync_branch.rsplit("/", 1)
+    return f"{prefix}-revert/{sha}"
 
 
 def _push_branch(
@@ -2509,9 +2384,7 @@ def _push_branch(
     """Push the sync branch and confirm it landed. Never overwrites a branch a person committed to."""
     push = ["push", "--quiet", clone_url, f"{commit}:refs/heads/{branch}"]
     remote = cust.run("ls-remote", clone_url, f"refs/heads/{branch}").split()
-    if (
-        remote
-    ):  # our branch exists with no open PR: overwrite only if no human committed to it
+    if remote:  # our branch exists with no open PR: overwrite only if no human committed to it
         if not tool_only(gh, full, default, branch):
             return Result(
                 full,
@@ -2522,17 +2395,11 @@ def _push_branch(
     try:
         cust.run(*push)
     except GitError as e:
-        hint = (
-            " (the token needs the 'workflow' scope)"
-            if "workflow" in str(e).lower()
-            else ""
-        )
+        hint = " (the token needs the 'workflow' scope)" if "workflow" in str(e).lower() else ""
         raise GitError(f"{e}{hint}") from None
     landed = cust.run("ls-remote", clone_url, f"refs/heads/{branch}").split()
     if not landed or landed[0] != commit:
-        raise GitError(
-            f"push of {branch} could not be confirmed; no pull request opened"
-        )
+        raise GitError(f"push of {branch} could not be confirmed; no pull request opened")
     return None
 
 
@@ -2552,10 +2419,10 @@ def _open_pr(
     branch: str,
     plan: Plan,
     body: str,
-    up: Upstream,
+    title: str,
     args,
+    extra_labels: tuple = (),
 ) -> dict:
-    title = f"{args.title}{': action required' if plan.todo else ''} ({up.sha[:7]})"
     payload = {
         "title": title,
         "head": branch,
@@ -2566,15 +2433,13 @@ def _open_pr(
     }
     pr = create_pr(gh, full, owner, payload)
     issue = f"/repos/{full}/issues/{pr['number']}"
-    if plan.blocking and not pr.get(
-        "draft"
-    ):  # this plan has no draft PRs: make "not ready" explicit
+    if plan.blocking and not pr.get("draft"):  # this plan has no draft PRs: make "not ready" explicit
         fixed = {"body": body.replace(DRAFT_NOTE, NOT_DRAFT_NOTE, 1)}
         _best_effort(
             f"{full}: body",
             lambda: gh.req("PATCH", f"/repos/{full}/pulls/{pr['number']}", fixed),
         )
-    labels = [SYNC_LABEL] + (["merge-conflicts"] if plan.changes["conflict"] else [])
+    labels = [SYNC_LABEL, *extra_labels] + (["merge-conflicts"] if plan.changes["conflict"] else [])
     labels += ["needs-work"] if plan.blocking else []
     _best_effort(
         f"{full}: labels",
@@ -2603,9 +2468,7 @@ def _open_pr(
     return pr
 
 
-def _close_superseded(
-    gh: GitHub, full: str, default: str, open_prs: list, up: Upstream
-) -> None:
+def _close_superseded(gh: GitHub, full: str, default: str, open_prs: list, up: Upstream) -> None:
     """Close older sync PRs and delete their branches. Never one a person has committed to,
     and never one for newer upstream code (e.g. a manual run on main, then a release run)."""
     for old in open_prs:
@@ -2642,21 +2505,14 @@ def _close_superseded(
 # CLI
 # --------------------------------------------------------------------------- #
 def read_orgs_file(path: str) -> list[str]:
-    names = (
-        raw.split("#", 1)[0].strip()
-        for raw in Path(path).read_text(encoding="utf-8").splitlines()
-    )
+    names = (raw.split("#", 1)[0].strip() for raw in Path(path).read_text(encoding="utf-8").splitlines())
     return [n for n in names if n]
 
 
 def discover(gh: GitHub, args: argparse.Namespace) -> tuple[list[dict], list[Result]]:
     """The integration repo of every requested org (or of every org the token can see), plus a
     result for each org that has none or could not be read, so no org drops out of the report."""
-    orgs = list(
-        dict.fromkeys(
-            args.orgs + (read_orgs_file(args.orgs_file) if args.orgs_file else [])
-        )
-    )
+    orgs = list(dict.fromkeys(args.orgs + (read_orgs_file(args.orgs_file) if args.orgs_file else [])))
     if not orgs:
         orgs = [o["login"] for o in gh.paginate("/user/orgs")]
     bad = [o for o in orgs if not ORG_RE.match(o)]
@@ -2677,11 +2533,7 @@ def discover(gh: GitHub, args: argparse.Namespace) -> tuple[list[dict], list[Res
         if repo:
             repos.append(repo)
         else:
-            unreadable.append(
-                Result(
-                    full, "skipped", "no such repository, or the token cannot see it"
-                )
-            )
+            unreadable.append(Result(full, "skipped", "no such repository, or the token cannot see it"))
     return repos, unreadable
 
 
@@ -2690,11 +2542,7 @@ def missing_scopes(header: str | None) -> list[str]:
     if not header:  # fine-grained tokens and app tokens: checked per repo instead
         return []
     scopes = {x.strip() for x in header.split(",")}
-    return [
-        s
-        for s in ("repo", "workflow")
-        if s not in scopes and not (s == "repo" and "public_repo" in scopes)
-    ]
+    return [s for s in ("repo", "workflow") if s not in scopes and not (s == "repo" and "public_repo" in scopes)]
 
 
 def resolve_token(git_host: str) -> str | None:
@@ -2729,9 +2577,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--orgs-file",
         help="file with one organization per line, # comments allowed; adds to --orgs",
     )
-    ap.add_argument(
-        "--exclude-orgs", nargs="+", default=[], help="organizations to skip"
-    )
+    ap.add_argument("--exclude-orgs", nargs="+", default=[], help="organizations to skip")
     ap.add_argument(
         "--repo-name",
         default="veracode",
@@ -2761,16 +2607,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="write the patch and PR text to --out-dir; push nothing",
     )
-    ap.add_argument(
-        "--out-dir", default="out", help="dry-run output folder (default: out)"
-    )
-    ap.add_argument(
-        "--reviewers", nargs="+", default=[], help="users and/or team:<slug> to request"
-    )
+    ap.add_argument("--out-dir", default="out", help="dry-run output folder (default: out)")
+    ap.add_argument("--reviewers", nargs="+", default=[], help="users and/or team:<slug> to request")
     ap.add_argument(
         "--force",
         action="store_true",
         help="open a PR even if this update was declined before",
+    )
+    ap.add_argument(
+        "--revert",
+        action="store_true",
+        help="undo the last update: close its open PR, or open a PR that reverts the merged one",
     )
     ap.add_argument("--upstream-url", default=DEFAULT_UPSTREAM)
     ap.add_argument(
@@ -2801,9 +2648,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("--version", action="version", version=__version__)
     args = ap.parse_args(argv)
-    if not REPO_RE.match(args.repo_name) or not re.match(
-        r"^[A-Za-z0-9._/-]{1,60}$", args.branch_prefix
-    ):
+    if not REPO_RE.match(args.repo_name) or not re.match(r"^[A-Za-z0-9._/-]{1,60}$", args.branch_prefix):
         ap.error("invalid --repo-name or --branch-prefix")
     if args.orgs_file and not Path(args.orgs_file).is_file():
         ap.error(f"--orgs-file not found: {args.orgs_file}")
@@ -2812,15 +2657,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if not 1 <= args.workers <= MAX_WORKERS:
         ap.error(f"--workers must be between 1 and {MAX_WORKERS}")
     api = urllib.parse.urlsplit(args.api_base)
-    if api.scheme != "https" and not (
-        api.scheme == "http" and api.hostname in ("localhost", "127.0.0.1", "::1")
-    ):
+    if api.scheme != "https" and not (api.scheme == "http" and api.hostname in ("localhost", "127.0.0.1", "::1")):
         ap.error("--api-base must be an https:// URL (the token is sent to it)")
     args.keep_defaults = not args.adopt_new_defaults
     host = urllib.parse.urlsplit(args.api_base).hostname or ""
-    args.git_host = (
-        "github.com" if host == "api.github.com" else host.removeprefix("api.")
-    )
+    args.git_host = "github.com" if host == "api.github.com" else host.removeprefix("api.")
     return args
 
 
@@ -2858,15 +2699,17 @@ def main(argv: list[str] | None = None) -> int:
     workdir = Path(tempfile.mkdtemp(prefix="vsync-"))  # 0700, removed on exit
     try:
         try:
-            up = Upstream(args.upstream_url, args.upstream_ref, workdir)
+            up = None if args.revert else Upstream(args.upstream_url, args.upstream_ref, workdir)
             repos, unreadable = discover(gh, args)
         except (GitError, GitHubError) as e:
             log.error("%s", e)
             return 2
-        log.info("Syncing %d repo(s) as %s", len(repos), me["login"])
+        log.info("%s %d repo(s) as %s", "Reverting" if args.revert else "Syncing", len(repos), me["login"])
 
         def task(repo):
             try:
+                if up is None:
+                    return revert_repo(gh, repo, args, author, workdir)
                 return sync_repo(gh, up, repo, args, author, workdir)
             except (GitError, GitHubError, SafetyError, OSError) as e:
                 return Result(repo["full_name"], "error", str(e), effort="manual")
@@ -2886,34 +2729,25 @@ def main(argv: list[str] | None = None) -> int:
                     r = fut.result()
                     log.info("[%s] %s %s %s", r.repo, r.status, r.detail, r.pr)
             except KeyboardInterrupt:
-                log.warning(
-                    "Interrupted: finishing repos in progress, skipping the rest"
-                )
+                log.warning("Interrupted: finishing repos in progress, skipping the rest")
                 for fut in futures:
                     fut.cancel()
-        results = unreadable + [
-            f.result() for f in futures if f.done() and not f.cancelled()
-        ]
+        results = unreadable + [f.result() for f in futures if f.done() and not f.cancelled()]
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
-    counts = print_results(
-        results, gh, args, {"url": up.url, "ref": up.ref, "commit": up.sha}
-    )
+    upstream = {"revert": True} if up is None else {"url": up.url, "ref": up.ref, "commit": up.sha}
+    counts = print_results(results, gh, args, upstream)
     return 1 if counts.get("error") else 0
 
 
-def print_results(
-    results: list[Result], gh: GitHub, args: argparse.Namespace, upstream: dict
-) -> collections.Counter:
+def print_results(results: list[Result], gh: GitHub, args: argparse.Namespace, upstream: dict) -> collections.Counter:
     results.sort(key=lambda r: r.repo.lower())
     width = max([len(r.repo) for r in results] + [10])
     print(f"\n{'REPO':<{width}}  {'STATUS':<12}  {'EFFORT':<7}  DETAIL")
     for r in results:
         extra = f"  ({r.work or r.detail})" if r.pr and (r.work or r.detail) else ""
-        print(
-            f"{r.repo:<{width}}  {r.status:<12}  {r.effort or '-':<7}  {r.pr or r.detail}{extra}"
-        )
+        print(f"{r.repo:<{width}}  {r.status:<12}  {r.effort or '-':<7}  {r.pr or r.detail}{extra}")
     counts = collections.Counter(r.status for r in results)
     print(
         "\n"
@@ -2949,6 +2783,11 @@ NEXT_STEP = (  # (status, text in the detail) -> (org status, action, details) f
         "Re-propose the update",
         "It was closed without merging: re-run with --force",
     ),
+    ("skipped", "was reverted", 3, "None", "It was reverted: re-run with --force to apply it again"),
+    ("skipped", "nothing to revert", 3, "None", "No merged update to revert, or its changes are already undone"),
+    ("skipped", "already reverted", 3, "None", "Already reverted"),
+    ("reverted", "", 3, "None", "Closed the open update PR, it was not merged"),
+    ("dry-run", "would close", 3, "Close the open update PR", "Run again without --dry-run"),
     ("skipped", "archived", 3, "None", "The repo is archived"),
     (
         "skipped",
@@ -2999,9 +2838,7 @@ def _rows_for(r: Result) -> tuple[int, list[dict]]:
                 }
             ]
         if r.status == "dry-run":
-            rows.append(
-                {"action": "Open the PR", "details": "Run again without --dry-run"}
-            )
+            rows.append({"action": "Open the PR", "details": "Run again without --dry-run"})
         else:
             rows.append(
                 {
@@ -3012,20 +2849,14 @@ def _rows_for(r: Result) -> tuple[int, list[dict]]:
         return (1 if any(i.get("must_fix") for i in rows) else 0), rows
     for status, needle, order, action, details in NEXT_STEP:
         if r.status == status and needle in r.detail:
-            sections = ", ".join(
-                sorted(
-                    set(re.findall(r"renamed or removed section `([^`]+)`", r.detail))
-                )
-            )
+            sections = ", ".join(sorted(set(re.findall(r"renamed or removed section `([^`]+)`", r.detail))))
             text = details.format(
                 sections=f"Move your settings out of {sections} (upstream renamed or removed them), then re-run",
                 reason=r.detail.split("nothing pushed: ", 1)[-1],
                 detail=r.detail,
             )
             row = {"action": action, "details": text, "must_fix": order == 2}
-            return order, [
-                row | ({"where": CONFIG_FILE} if "veracode.yml" in action else {})
-            ]
+            return order, [row | ({"where": CONFIG_FILE} if "veracode.yml" in action else {})]
     return 2, [{"action": "Check the error", "details": r.detail, "must_fix": True}]
 
 
@@ -3062,14 +2893,8 @@ def write_report_csv(results: list[Result], path: Path) -> None:
                 "pr",
             ]
         )
-        for order, fixes, r, rows in sorted(
-            orgs, key=lambda x: (x[0], x[1], x[2].repo.lower())
-        ):
-            pr = (
-                _hyperlink(r.pr, f"PR #{r.pr.rstrip('/').rsplit('/', 1)[-1]}")
-                if r.pr
-                else ""
-            )
+        for order, fixes, r, rows in sorted(orgs, key=lambda x: (x[0], x[1], x[2].repo.lower())):
+            pr = _hyperlink(r.pr, f"PR #{r.pr.rstrip('/').rsplit('/', 1)[-1]}") if r.pr else ""
             for row in rows:
                 w.writerow(
                     [
