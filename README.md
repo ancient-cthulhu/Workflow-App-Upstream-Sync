@@ -18,23 +18,27 @@ For each organization, the script:
    - No custom setting or custom file was lost
 4. Opens a pull request. If every check passes, it's ready to merge. Otherwise it's a draft, labeled `needs-work`, with a To do list. If a custom setting would be lost, no PR is opened and the repo is reported as an error.
 
-It never pushes to the default branch, and never changes a branch that someone else has committed to. `veracode.yml` keeps its current values, and new upstream settings are added. Action versions always come from upstream: if the repo changed a version that upstream also updated, upstream's version is used and the PR lists it. A version pinned to a commit SHA is left as a conflict, so it gets re-pinned instead of unpinned.
+It never pushes to the default branch. `veracode.yml` keeps its current values, and new upstream settings and product sections are added as upstream wrote them (with their comments), listed in the PR. When upstream updates an action version, upstream's version is used even if the repo had changed it, and the PR lists it. A version the repo moved ahead of upstream is never downgraded. A version pinned to a commit SHA is left as a conflict, so it gets re-pinned instead of unpinned.
 
 ---
 
 ## Quickstart
 
 ```bash
-# 1. Test org first: merge its PR and run a scan
-python veracode_upstream_sync.py --orgs my-test-org
+# 1. Test on one org first: merge its PR and run a scan
+python veracode_upstream_sync.py --orgs test-org
 
 # 2. See what would happen everywhere. No writes, results in ./out
 python veracode_upstream_sync.py --orgs-file orgs.txt --dry-run
 
 # 3. Roll out the version you tested, assign drafts to yourself
 python veracode_upstream_sync.py --orgs-file orgs.txt --upstream-ref <tested tag or sha> --assign-drafts my-user
+
+# Undo the last update in an org
+python veracode_upstream_sync.py --orgs my-org --revert
 ```
 
+Re-running is safe.
 ---
 
 ## Requirements
@@ -59,8 +63,9 @@ Token in `GH_TOKEN` or `GITHUB_TOKEN`, or a `gh auth login` session:
 | `--reviewers` | Request reviewers (`user` or `team:slug`) |
 | `--keep` | Extra files never to change (`repo_list.yml` is always kept) |
 | `--adopt-new-defaults` | Apply upstream's new `veracode.yml` defaults instead of keeping current values |
-| `--force` | Reopen an update that was closed without merging |
-| `--report` | Write a JSON report |
+| `--force` | Reopen an update that was closed without merging, or apply a reverted one again |
+| `--revert` | Undo the last update: close its open PR, or open a PR that reverts the merged one (see below) |
+| `--report` | Write a JSON report and the CSV action list |
 | `--workers` | Repos processed in parallel, 1 to 32 (default 4) |
 | `--api-base` | GHE.com API URL (HTTPS only) |
 
@@ -73,13 +78,14 @@ Token in `GH_TOKEN` or `GITHUB_TOKEN`, or a `gh auth login` session:
 | `pr-created` | PR opened: `ready`, or `needs work` (draft) |
 | `pr-exists` | A PR for this upstream version is already open |
 | `up-to-date` / `skipped` | Nothing to do, or the org has no `veracode` repo (the detail says why) |
+| `reverted` | `--revert` closed the open update PR (nothing had been merged) |
 | `error` | Nothing pushed for this repo (or the org could not be read), the others still ran |
 
 Exit code `1` if any repo errored, `2` on setup errors (token, upstream).
 
 ### Report
 
-`--report run.json` also writes `run.csv`, the list of actions for the team: one row per action, orgs with the least to fix first. Run it with `--dry-run` first to plan the rollout.
+`--report run.json` also writes `run.csv`, the list of actions for the team: one row per action, orgs with the least to fix first. Run it with `--dry-run` first to plan the rollout. Re-runs read the actions back from open PRs.
 
 | Column | Content |
 |---|---|
@@ -92,6 +98,10 @@ Exit code `1` if any repo errored, `2` on setup errors (token, upstream).
 | `details` | What to change, for example `Pick one value for "fetch-depth": yours "fetch-depth: 1" or upstream's "fetch-depth: 0"` |
 | `pr` | Link to the PR |
 
+### Revert
+
+`--revert` undoes only what the last update changed, with a 3-way merge per file, so changes made after it are kept. If a later change touched the same lines, the revert PR is a draft with the conflicts in its To do list. Later runs skip a reverted upstream version however it was reverted (this flag, GitHub's Revert button, or by hand), and the next upstream release opens a new update as usual. Works with `--dry-run` and `--report`.
+
 ---
 
 ## Troubleshooting
@@ -103,4 +113,3 @@ Exit code `1` if any repo errored, `2` on setup errors (token, upstream).
 | `branch ... has commits from someone else` | Delete that branch, then re-run |
 | `would lose your value ... (upstream renamed or removed section ...)` | The repo predates a `veracode.yml` restructure: move those values to the new section by hand once |
 
----
