@@ -48,7 +48,7 @@ try:
 except ImportError:  # pragma: no cover
     sys.exit("PyYAML is required: pip install pyyaml")
 
-__version__ = "3.9.2"
+__version__ = "3.10.0"
 
 DEFAULT_UPSTREAM = "https://github.com/veracode/github-actions-integration.git"
 DEFAULT_API = "https://api.github.com"
@@ -402,8 +402,8 @@ class Git:
 def clone(url: str, dest: Path, env: dict, branch: str | None = None) -> Git:
     """Bare partial clone: full history of small files, large binaries on demand."""
     args = ["git", "clone", "--bare", "--quiet", f"--filter={BLOB_LIMIT}"]
-    if branch:
-        args += ["--single-branch", "--branch", branch]
+    if branch:  # a customer repo: only its default branch
+        args += ["--single-branch", "--no-tags", "--branch", branch]
     try:
         p = subprocess.run(
             [*args, url, str(dest)],
@@ -804,8 +804,9 @@ def _action_row(action: str, details: str) -> dict:
 # --------------------------------------------------------------------------- #
 # YAML helpers (strict parsing; comment-preserving text edits)
 # --------------------------------------------------------------------------- #
-class _StrictLoader(yaml.SafeLoader):
-    """SafeLoader that rejects duplicate keys (plain PyYAML silently keeps the last)."""
+class _StrictLoader(getattr(yaml, "CSafeLoader", yaml.SafeLoader)):  # type: ignore[misc]
+    """SafeLoader that rejects duplicate keys (plain PyYAML silently keeps the last).
+    Uses libyaml when PyYAML has it (about 9x faster, same result)."""
 
 
 def _mapping_without_duplicates(loader, node, deep=False):
@@ -2032,8 +2033,11 @@ def sync_repo(
         if p["head"]["ref"].startswith(args.branch_prefix + "/")
         and (p["head"].get("repo") or {}).get("full_name") == full
     ]
-    if not args.dry_run and (done := _already_handled(gh, full, owner, branch, open_prs, args.force)):
-        return done
+    closed: list = []  # this update's closed PRs: declined, or merged and later undone
+    if not args.dry_run:
+        done, closed = _already_handled(gh, full, owner, branch, open_prs, args.force)
+        if done:
+            return done
 
     clone_url = repo["clone_url"]
     cust = clone(
@@ -2062,12 +2066,7 @@ def sync_repo(
         if {p: e for p, e in plan.final.items() if p != MARKER} == {p: e for p, e in ours.items() if p != MARKER}:
             return Result(full, "up-to-date", f"base: {how}")
         # merged before, yet the repo does not have it: someone undid it (--revert, GitHub's Revert button, by hand)
-        undone = (
-            []
-            if args.force or args.dry_run
-            else [p for p in _closed_prs(gh, full, owner, branch) if p.get("merged_at")]
-        )
-        if undone:
+        if undone := [p for p in closed if p.get("merged_at")]:
             return Result(
                 full, "skipped", "this update was reverted (use --force to apply it again)", undone[0]["html_url"]
             )
@@ -2332,8 +2331,11 @@ def _pr_effort(pr: dict) -> dict:
     return {}
 
 
-def _already_handled(gh: GitHub, full: str, owner: str, branch: str, open_prs: list, force: bool) -> Result | None:
-    """A PR for this upstream commit is open, or it was closed without merging (declined)."""
+def _already_handled(
+    gh: GitHub, full: str, owner: str, branch: str, open_prs: list, force: bool
+) -> tuple[Result | None, list]:
+    """A PR for this upstream commit is open, or it was closed without merging (declined).
+    Also returns this update's closed PRs (none with --force), so they are read once."""
     same = [p for p in open_prs if p["head"]["ref"] == branch]
     if same:
         return Result(
@@ -2342,7 +2344,8 @@ def _already_handled(gh: GitHub, full: str, owner: str, branch: str, open_prs: l
             "already open for this upstream commit",
             same[0]["html_url"],
             **_pr_effort(same[0]),
-        )
+        ), []
+    closed: list = []
     if not force:
         closed = _closed_prs(gh, full, owner, branch)
         declined = [
@@ -2356,8 +2359,8 @@ def _already_handled(gh: GitHub, full: str, owner: str, branch: str, open_prs: l
                 "skipped",
                 "this update was declined before (use --force)",
                 declined[0]["html_url"],
-            )
-    return None
+            ), closed
+    return None, closed
 
 
 def _closed_prs(gh: GitHub, full: str, owner: str, branch: str) -> list:
@@ -2520,21 +2523,18 @@ def discover(gh: GitHub, args: argparse.Namespace) -> tuple[list[dict], list[Res
         log.error("Invalid organization name(s): %s", ", ".join(bad))
         raise SystemExit(2)
     skip = {o.lower() for o in args.exclude_orgs}
-    repos, unreadable = [], []
-    for org in orgs:
-        if org.lower() in skip:
-            continue
+
+    def lookup(org: str) -> dict | Result:
         full = f"{org}/{args.repo_name}"
         try:
             repo = gh.get(f"/repos/{full}", ok404=True)
         except GitHubError as e:
-            unreadable.append(Result(full, "error", str(e), effort="manual"))
-            continue
-        if repo:
-            repos.append(repo)
-        else:
-            unreadable.append(Result(full, "skipped", "no such repository, or the token cannot see it"))
-    return repos, unreadable
+            return Result(full, "error", str(e), effort="manual")
+        return repo or Result(full, "skipped", "no such repository, or the token cannot see it")
+
+    with cf.ThreadPoolExecutor(max_workers=args.workers) as pool:  # GETs only, rate limited
+        found = list(pool.map(lookup, [o for o in orgs if o.lower() not in skip]))
+    return [r for r in found if isinstance(r, dict)], [r for r in found if isinstance(r, Result)]
 
 
 def missing_scopes(header: str | None) -> list[str]:
@@ -2635,8 +2635,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument(
         "--workers",
         type=int,
-        default=4,
-        help=f"repos processed in parallel, 1 to {MAX_WORKERS} (default: 4)",
+        default=8,
+        help=f"repos processed in parallel, 1 to {MAX_WORKERS} (default: 8)",
     )
     ap.add_argument(
         "--git-timeout",
@@ -2699,8 +2699,10 @@ def main(argv: list[str] | None = None) -> int:
     workdir = Path(tempfile.mkdtemp(prefix="vsync-"))  # 0700, removed on exit
     try:
         try:
-            up = None if args.revert else Upstream(args.upstream_url, args.upstream_ref, workdir)
-            repos, unreadable = discover(gh, args)
+            with cf.ThreadPoolExecutor(max_workers=1) as bg:  # clone upstream meanwhile
+                cloning = None if args.revert else bg.submit(Upstream, args.upstream_url, args.upstream_ref, workdir)
+                repos, unreadable = discover(gh, args)
+                up = cloning.result() if cloning else None
         except (GitError, GitHubError) as e:
             log.error("%s", e)
             return 2
