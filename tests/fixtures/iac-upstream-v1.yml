@@ -1,0 +1,73 @@
+name: Veracode IaC/Secrets Scanning
+
+run-name: Veracode IaC/Secrets Scanning - ${{ github.event.client_payload.repository.name }}
+
+concurrency:
+  group: ${{ github.event.client_payload.event_type }}-${{ github.event.client_payload.repository.name }}-${{ github.event.client_payload.repository.branch }}
+  cancel-in-progress: true
+
+on:
+  repository_dispatch:
+    types: [veracode-iac-secrets-scan]
+    
+jobs:
+  cleanup:
+    uses: ./.github/workflows/veracode-clean-up.yml
+    with:
+      runs_on: ${{ github.event.client_payload.user_config.default_runs_on }}
+
+  register:
+    needs: cleanup
+    uses: ./.github/workflows/veracode-check-run.yml
+    with:
+      check_run_name: ${{ github.workflow }}
+      head_sha: ${{ github.event.client_payload.sha }}
+      repository_owner: ${{ github.event.client_payload.repository.owner }}
+      repository_name: ${{ github.event.client_payload.repository.name }}
+      event_type: ${{ github.event.client_payload.event_type }}
+      github_token: ${{ github.event.client_payload.token }}
+      run_id: ${{ github.run_id }}
+      branch: ${{ github.event.client_payload.repository.branch }}
+      default_runs_on: ${{ github.event.client_payload.user_config.default_runs_on }}
+
+  validations:
+    needs: register
+    runs-on: ${{ fromJson(github.event.client_payload.user_config.default_runs_on) }}
+    name: Validations
+    steps:
+      - name: Verify Veracode API credentials
+        id: verify_api_creds
+        uses: Veracode/github-actions-integration-helper@v0.1.9
+        with:
+          action: validateVeracodeApiCreds
+          token: ${{ github.event.client_payload.token }}
+          vid: ${{ secrets.VERACODE_API_ID }}
+          vkey: ${{ secrets.VERACODE_API_KEY }}
+          appname: ${{ github.event.client_payload.user_config.profile_name }}
+          source_repository: ${{ github.event.client_payload.repository.full_name }}
+          check_run_id: ${{ needs.register.outputs.run_id }}
+  
+  veracode-iac-secrets-scan:
+    needs: [register, validations]
+    runs-on: ${{ fromJson(github.event.client_payload.user_config.default_runs_on) }}
+    name: Veracode IaC/Secrets Scanning
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.client_payload.repository.full_name }}
+          ref: ${{ github.event.client_payload.sha }}
+          token: ${{ github.event.client_payload.token }}
+
+      - name: Run Veracode IaC/Secrets Scanning
+        uses: veracode/container_iac_secrets_scanning@v1.0.7
+        with:
+            vid: ${{ secrets.VERACODE_API_ID }}
+            vkey: ${{ secrets.VERACODE_API_KEY }}
+            command: "scan" 
+            type: "directory"
+            source: "./"
+            format: "json"
+            debug: ${{ github.event.client_payload.user_config.debug }}
+            fail_build: ${{ github.event.client_payload.user_config.break_build_policy_findings }}
+            fail_build_on_error: ${{ github.event.client_payload.user_config.break_build_on_error }}

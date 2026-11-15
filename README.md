@@ -18,7 +18,9 @@ For each organization, the script:
    - No custom setting or custom file was lost
 4. Opens a pull request. If every check passes, it's ready to merge. Otherwise it's a draft, labeled `needs-work`, with a To do list. If a custom setting would be lost, no PR is opened and the repo is reported as an error.
 
-It never pushes to the default branch. `veracode.yml` keeps its current values, and new upstream settings and product sections are added as upstream wrote them (with their comments), listed in the PR. When upstream updates an action version, upstream's version is used even if the repo had changed it, and the PR lists it. A version the repo moved ahead of upstream is never downgraded. A version pinned to a commit SHA is left as a conflict, so it gets re-pinned instead of unpinned.
+It never pushes to the default branch. `veracode.yml` keeps its current values, and new upstream settings and product sections are added as upstream wrote them (with their comments), listed in the PR. When upstream updates an action version, upstream's version is used even if the repo had changed it, and the PR lists it. A version the repo moved ahead of upstream (`vX[.Y[.Z]]`) is never downgraded, and the PR lists it as kept. A version pinned to a commit SHA, or a branch that differs from upstream's ref, is left as a conflict, so it gets re-pinned instead of unpinned.
+
+A step marked with a `# veracode-iac-rbac` comment (added by [Workflow-App-Bulk-Enterprise-Integration](https://github.com/ancient-cthulhu/Workflow-App-Bulk-Enterprise-Integration) to run IaC/secrets scans with the Veracode CLI) replaces upstream's `veracode/container_iac_secrets_scanning` step on purpose: it is kept, upstream's other changes to that workflow are taken, and the PR lists it as a custom step. Changes upstream makes to the replaced action's step are not applied; re-run Bulk if they matter.
 
 ---
 
@@ -81,11 +83,11 @@ Token in `GH_TOKEN` or `GITHUB_TOKEN`, or a `gh auth login` session:
 | `reverted` | `--revert` closed the open update PR (nothing had been merged) |
 | `error` | Nothing pushed for this repo (or the org could not be read), the others still ran |
 
-Exit code `1` if any repo errored, `2` on setup errors (token, upstream).
+Exit code `1` if any repo errored, `2` on setup errors (token, upstream), `130` when interrupted with Ctrl-C (repos in progress finish; the rest are reported as `error`, `interrupted`).
 
 ### Report
 
-`--report run.json` also writes `run.csv`, the list of actions for the team: one row per action, orgs with the least to fix first. Run it with `--dry-run` first to plan the rollout. Re-runs read the actions back from open PRs.
+`--report run.json` also writes `run.csv` (`--report run.csv` writes the JSON there and the CSV to `run.actions.csv`), the list of actions for the team: one row per action, orgs with the least to fix first. Run it with `--dry-run` first to plan the rollout; it also reports PRs already open or declined, like a real run. Re-runs read the actions back from open PRs.
 
 | Column | Content |
 |---|---|

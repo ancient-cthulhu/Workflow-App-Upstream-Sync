@@ -1,0 +1,96 @@
+name: Veracode IaC/Secrets Scanning
+
+run-name: Veracode IaC/Secrets Scanning - ${{ github.event.client_payload.repository.name }}
+
+concurrency:
+  group: ${{ github.event.client_payload.event_type }}-${{ github.event.client_payload.repository.name }}-${{ github.event.client_payload.repository.branch }}
+  cancel-in-progress: true
+
+on:
+  repository_dispatch:
+    types: [veracode-iac-secrets-scan]
+    
+jobs:
+  cleanup:
+    uses: ./.github/workflows/veracode-clean-up.yml
+    with:
+      runs_on: ${{ github.event.client_payload.user_config.default_runs_on }}
+
+  register:
+    needs: cleanup
+    uses: ./.github/workflows/veracode-check-run.yml
+    with:
+      check_run_name: ${{ github.workflow }}
+      head_sha: ${{ github.event.client_payload.sha }}
+      repository_owner: ${{ github.event.client_payload.repository.owner }}
+      repository_name: ${{ github.event.client_payload.repository.name }}
+      event_type: ${{ github.event.client_payload.event_type }}
+      github_token: ${{ github.event.client_payload.token }}
+      run_id: ${{ github.run_id }}
+      branch: ${{ github.event.client_payload.repository.branch }}
+      default_runs_on: ${{ github.event.client_payload.user_config.default_runs_on }}
+
+  validations:
+    needs: register
+    runs-on: ${{ fromJson(github.event.client_payload.user_config.default_runs_on) }}
+    name: Validations
+    steps:
+      - name: Verify Veracode API credentials
+        id: verify_api_creds
+        uses: Veracode/github-actions-integration-helper@v0.1.9
+        with:
+          action: validateVeracodeApiCreds
+          token: ${{ github.event.client_payload.token }}
+          vid: ${{ secrets.VERACODE_API_ID }}
+          vkey: ${{ secrets.VERACODE_API_KEY }}
+          appname: ${{ github.event.client_payload.user_config.profile_name }}
+          source_repository: ${{ github.event.client_payload.repository.full_name }}
+          check_run_id: ${{ needs.register.outputs.run_id }}
+  
+  veracode-iac-secrets-scan:
+    needs: [register, validations]
+    runs-on: ${{ fromJson(github.event.client_payload.user_config.default_runs_on) }}
+    name: Veracode IaC/Secrets Scanning
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.client_payload.repository.full_name }}
+          ref: ${{ github.event.client_payload.sha }}
+          token: ${{ github.event.client_payload.token }}
+
+      # veracode-iac-rbac (managed by Workflow-App-Bulk-Enterprise-Integration script.py)
+      # Runs the Veracode CLI directly instead of veracode/container_iac_secrets_scanning so
+      # IaC/secrets results are linked to the application profile and its teams (RBAC).
+      # Requires Veracode CLI 2.55.0 or later; the latest CLI is installed on every run.
+      - name: Run Veracode IaC/Secrets Scanning
+        id: veracode_iac_scan
+        shell: bash
+        env:
+          VERACODE_API_KEY_ID: ${{ secrets.VERACODE_API_ID }}
+          VERACODE_API_KEY_SECRET: ${{ secrets.VERACODE_API_KEY }}
+          # Application profile used by the static and SCA scans (default: <org>/<repo>).
+          VERACODE_APP_NAME: ${{ github.event.client_payload.user_config.profile_name || github.event.client_payload.repository.full_name }}
+          # Comma-separated Veracode team names. Empty: the profile is assigned to all teams of the API user.
+          VERACODE_TEAMS: "Sec Team \"A\",Ops"
+          VERACODE_POLICY: ${{ github.event.client_payload.policy_name }}
+          FAIL_BUILD: ${{ github.event.client_payload.user_config.break_build_policy_findings }}
+          FAIL_BUILD_ON_ERROR: ${{ github.event.client_payload.user_config.break_build_on_error }}
+          DEBUG: ${{ github.event.client_payload.user_config.debug }}
+          MIN_CLI_VERSION: "2.55.0"
+        run: |
+          set +e
+          # (Bulk's full Veracode CLI script, trimmed for the test)
+          veracode scan --type directory --source ./ --teams "$VERACODE_TEAMS"
+          EXIT_CODE=$?
+          exit "$EXIT_CODE"
+
+      # Upload problems never fail the job (same as the action, which ignored upload errors).
+      - name: Store Veracode IaC/Secrets Scanning results
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: Veracode Container IaC Secrets Scanning Results
+          path: ${{ runner.temp }}/veracode-iac-results/
+          if-no-files-found: ignore
