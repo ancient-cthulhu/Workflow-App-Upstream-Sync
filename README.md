@@ -38,6 +38,10 @@ python veracode_upstream_sync.py --orgs-file orgs.txt --upstream-ref <tested tag
 
 # Undo the last update in an org
 python veracode_upstream_sync.py --orgs my-org --revert
+
+# Let GitHub merge ready PRs once reviews and checks pass (preview first with --dry-run)
+python veracode_upstream_sync.py --orgs-file orgs.txt --dry-run --auto-merge --report plan.json
+python veracode_upstream_sync.py --orgs-file orgs.txt --auto-merge --report run.json
 ```
 
 Re-running is safe.
@@ -52,6 +56,8 @@ Token in `GH_TOKEN` or `GITHUB_TOKEN`, or a `gh auth login` session:
 - **Classic PAT:** `repo`, `workflow`, `read:org`. Authorize it for SAML SSO orgs.
 - **Fine-grained PAT:** read and write on Contents, Pull requests, Workflows and Issues, plus read on Secrets, Variables, Administration and Actions. One org per token.
 
+`--auto-merge` needs nothing more: the same push access and Pull requests write permission. The repo must have **Settings > General > Allow auto-merge** turned on; the tool never changes repo settings or branch protection.
+
 ---
 
 ## Options
@@ -61,6 +67,7 @@ Token in `GH_TOKEN` or `GITHUB_TOKEN`, or a `gh auth login` session:
 | `--orgs`, `--orgs-file`, `--exclude-orgs` | Orgs to sync. Default: every org the token can see |
 | `--upstream-ref` | Upstream tag or commit. Default: the latest `vX.Y.Z` release |
 | `--dry-run` | Write the diff and PR text to `--out-dir`, push nothing |
+| `--auto-merge` | Turn on GitHub's auto-merge for PRs that pass every check (see below). With `--dry-run`, only report which would qualify |
 | `--assign-drafts` | Assign draft PRs to these users |
 | `--reviewers` | Request reviewers (`user` or `team:slug`) |
 | `--keep` | Extra files never to change (`repo_list.yml` is always kept) |
@@ -103,6 +110,49 @@ Exit code `1` if any repo errored, `2` on setup errors (token, upstream), `130` 
 ### Revert
 
 `--revert` undoes only what the last update changed, with a 3-way merge per file, so changes made after it are kept. If a later change touched the same lines, the revert PR is a draft with the conflicts in its To do list. Later runs skip a reverted upstream version however it was reverted (this flag, GitHub's Revert button, or by hand), and the next upstream release opens a new update as usual. Works with `--dry-run` and `--report`.
+
+### Auto-merge
+
+`--auto-merge` turns on GitHub's own [auto-merge](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/incorporating-changes-from-a-pull-request/automatically-merging-a-pull-request) (GraphQL `enablePullRequestAutoMerge`). It never merges anything itself: GitHub merges the PR only once branch protection, required reviews and required checks are satisfied, and nothing is bypassed. Off by default; without it nothing changes.
+
+A PR qualifies only if all of these hold, checked on every run:
+
+- The merge had no conflicts, every check passed, and the To do list is empty (no `needs-work`, no missing secret or variable, nothing to confirm such as new defaults, replaced files or replaced action versions)
+- The PR is open, not a draft, not merged, not labeled `needs-work` or `merge-conflicts`, and comes from this update's branch
+- For a PR opened by an earlier run: its branch holds only this tool's commits and changes exactly what a fresh merge and fresh checks of the current default branch change. Results from earlier runs or reports are never reused
+
+Auto-merge is pinned to the commit that was checked, so GitHub refuses it if the branch moved since. The merge method is the repo's: the only one it allows, else GitHub's default for the token. A PR that already has auto-merge is left as it is, and no PR is opened twice. If auto-merge can't be turned on (disabled in the repo, permissions, merge method, rate limit, or the PR could already merge with nothing pending, which GitHub doesn't queue), the report says why and the sync still counts as successful.
+
+`--dry-run --auto-merge` runs the same checks read-only and reports what would happen: no branches, commits, PRs or auto-merge.
+
+| `auto_merge.status` | Meaning |
+|---|---|
+| `auto-merge-enabled` | Turned on; GitHub merges when the requirements are met |
+| `auto-merge-already-enabled` | It was already on |
+| `auto-merge-ineligible` | The PR doesn't qualify (`reason` says why) |
+| `auto-merge-unavailable` | The PR qualifies, but GitHub wouldn't turn it on (`reason` says why) |
+| `would-auto-merge` / `would-not-auto-merge` | `--dry-run` |
+
+The repo's `status` (`pr-created`, `pr-exists`, `dry-run`, ...) keeps its meaning; the outcome is added under `auto_merge` in the JSON report:
+
+```json
+{
+  "repo": "acme/veracode",
+  "status": "pr-created",
+  "pr": "https://github.com/acme/veracode/pull/42",
+  "effort": "ready",
+  "auto_merge": {
+    "requested": true,
+    "status": "auto-merge-enabled",
+    "eligible": true,
+    "enabled": true,
+    "reason": "All validation checks passed.",
+    "merge_method": "squash",
+    "pr_number": 42,
+    "validation": {"effort": "ready", "work": ""}
+  }
+}
+```
 
 ---
 

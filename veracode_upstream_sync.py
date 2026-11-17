@@ -51,7 +51,7 @@ try:
 except ImportError:  # pragma: no cover
     sys.exit("PyYAML is required: pip install pyyaml")
 
-__version__ = "3.10.0"
+__version__ = "3.11.0"
 
 DEFAULT_UPSTREAM = "https://github.com/veracode/github-actions-integration.git"
 DEFAULT_API = "https://api.github.com"
@@ -207,6 +207,14 @@ class GitHubError(RuntimeError):
         self.maybe_applied = maybe_applied  # a write may have landed; check before retrying
 
 
+class GraphQLError(GitHubError):
+    """A GraphQL reply with `errors` (HTTP 200): `types` holds their type codes, e.g. FORBIDDEN."""
+
+    def __init__(self, msg: str, types: tuple[str, ...] = ()):
+        super().__init__(0, msg)
+        self.types = types
+
+
 class _ApiRedirect(urllib.request.HTTPRedirectHandler):
     """Follow redirects only for reads and only within the API root, so the token never goes
     to another host. urllib would otherwise forward it anywhere, and silently turn a redirected
@@ -227,6 +235,8 @@ class GitHub:
         self.token = token
         self.limiter = limiter or RateLimiter()
         self._opener = urllib.request.build_opener(_ApiRedirect(self.api))
+        # api.github.com/graphql, api.SUB.ghe.com/graphql; GHES: https://HOST/api/v3 -> https://HOST/api/graphql
+        self.graphql_url = (self.api[: -len("/v3")] if self.api.endswith("/api/v3") else self.api) + "/graphql"
 
     def _urlopen(self, req):
         return self._opener.open(req, timeout=60)
@@ -244,7 +254,7 @@ class GitHub:
         a POST raises GitHubError(maybe_applied=True) so the caller can check."""
         idempotent = method != "POST" if idempotent is None else idempotent
         url = path if path.startswith(("https://", "http://")) else self.api + path
-        if not url.startswith(self.api + "/"):  # e.g. a pagination link: never send the token elsewhere
+        if not url.startswith(self.api + "/") and url != self.graphql_url:  # never send the token elsewhere
             raise GitHubError(
                 0,
                 f"refusing to send the token outside {self.api}: {urllib.parse.urlsplit(url).netloc}",
@@ -344,6 +354,17 @@ class GitHub:
 
     def get(self, path, ok404=False):
         return self.req("GET", path, ok404=ok404)[0]
+
+    def graphql(self, query: str, variables: dict) -> dict:
+        """POST a GraphQL query or mutation; errors in the reply raise GraphQLError. Only used for
+        auto-merge, whose mutation is idempotent (enabling it twice leaves it enabled)."""
+        data, _ = self.req("POST", self.graphql_url, {"query": query, "variables": variables}, idempotent=True)
+        data = data if isinstance(data, dict) else {}
+        if errors := data.get("errors"):
+            errors = [e for e in errors if isinstance(e, dict)] or [{"message": str(errors)}]
+            msg = "; ".join(str(e.get("message") or e.get("type") or "error") for e in errors)[:500]
+            raise GraphQLError(msg, tuple(str(e.get("type") or "") for e in errors))
+        return data.get("data") or {}
 
     def paginate(self, path):
         url = f"{self.api}{path}{'&' if '?' in path else '?'}per_page=100"
@@ -2421,6 +2442,7 @@ class Result:
     effort: str = ""  # see Plan.effort; "manual" when no PR could be opened
     work: str = ""
     details: dict = dataclasses.field(default_factory=dict)  # plan_details(), for the report
+    auto_merge: dict = dataclasses.field(default_factory=dict)  # --auto-merge outcome, see auto_merge_report
 
 
 def sync_repo(
@@ -2446,7 +2468,22 @@ def sync_repo(
     # read-only, so --dry-run reports what a real run would do (PR already open, declined).
     # closed: this update's closed PRs, declined or merged and later undone
     done, closed = _already_handled(gh, full, owner, branch, open_prs, args.force)
+    auto_merge = getattr(args, "auto_merge", False)
+    existing = None  # --auto-merge: this update's open PR, as GitHub reports it now; re-checked below
     if done:
+        if not (auto_merge and done.status == "pr-exists"):
+            return done
+        number = next(p["number"] for p in open_prs if p["head"]["ref"] == branch)
+        existing = gh.get(f"/repos/{full}/pulls/{number}") or {}
+        if problem := pr_state_problem(existing, branch, full):  # draft, closed, needs-work: no clone needed
+            done.auto_merge = _auto_merge(gh, full, None, existing, branch, None, args.dry_run, problem)
+            return done
+
+    def stop(result: Result, why: str = "") -> Result:
+        """With an open PR to re-check, its result stands and auto-merge is skipped for this reason."""
+        if existing is None or done is None:
+            return result
+        done.auto_merge = _auto_merge(gh, full, None, existing, branch, None, args.dry_run, why or result.detail)
         return done
 
     clone_url = repo["clone_url"]
@@ -2461,26 +2498,42 @@ def sync_repo(
         ours = cust.ls_tree(head)
         base_commit, how = find_base(cust, head, ours, up)
         if CONFIG_FILE not in ours or base_commit is None:
-            return Result(
-                full,
-                "skipped",
-                f"does not look like the Veracode integration (no {CONFIG_FILE})",
+            return stop(
+                Result(
+                    full,
+                    "skipped",
+                    f"does not look like the Veracode integration (no {CONFIG_FILE})",
+                )
             )
         if newer_than_target(cust, head, ours, up):
-            return Result(
-                full,
-                "skipped",
-                f"already has upstream changes newer than {up.ref}; nothing to do",
+            return stop(
+                Result(
+                    full,
+                    "skipped",
+                    f"already has upstream changes newer than {up.ref}; nothing to do",
+                )
             )
-        plan = merge_repo(cust, up, ours, base_commit, how, args)
+        try:
+            plan = merge_repo(cust, up, ours, base_commit, how, args)
+        except SafetyError as e:
+            if existing is None:
+                raise
+            return stop(Result(full, "error", str(e)))
         if {p: e for p, e in plan.final.items() if p != MARKER} == {p: e for p, e in ours.items() if p != MARKER}:
-            return Result(full, "up-to-date", f"base: {how}")
+            return stop(Result(full, "up-to-date", f"base: {how}"), "the default branch already has this update")
         # merged before, yet the repo does not have it: someone undid it (--revert, GitHub's Revert button, by hand)
         if undone := [p for p in closed if p.get("merged_at")]:
             return Result(
                 full, "skipped", "this update was reverted (use --force to apply it again)", undone[0]["html_url"]
             )
         check_settings(gh, full, plan, cust, ours)
+        if existing is not None and done is not None:  # this run's checks, on the PR's current branch
+            try:
+                problem, pr_head = existing_pr_problem(gh, cust, full, default, head, ours, plan, existing)
+            except (GitError, GitHubError) as e:
+                return stop(Result(full, "error", f"could not re-check the PR branch: {e}"))
+            done.auto_merge = _auto_merge(gh, full, plan, existing, branch, pr_head, args.dry_run, problem)
+            return done
         marker = {
             "upstream": up.url,
             "ref": up.ref,
@@ -2506,7 +2559,10 @@ def sync_repo(
             patch = cust.run("diff", head, commit)
             (out / f"{owner}__{name}.patch").write_text(patch, encoding="utf-8")
             (out / f"{owner}__{name}.md").write_text(body, encoding="utf-8")
-            return Result(full, "dry-run", f"{state}, see {out}/{owner}__{name}.md", **effort)
+            result = Result(full, "dry-run", f"{state}, see {out}/{owner}__{name}.md", **effort)
+            if auto_merge:  # reads only: no PR exists yet, so nothing can be enabled
+                result.auto_merge = _auto_merge(gh, full, plan, None, branch, None, True)
+            return result
 
         message = f"Sync Veracode integration with upstream {up.sha[:10]}\n\n"
         message += f"Upstream: {up.url} @ {up.sha}\n\n{TRAILER}: {up.sha}\n"
@@ -2516,7 +2572,11 @@ def sync_repo(
         title = f"{args.title}{': action required' if plan.todo else ''} ({up.sha[:7]})"
         pr = _open_pr(gh, full, owner, default, branch, plan, body, title, args)
         _close_superseded(gh, full, default, open_prs, up)
-        return Result(full, "pr-created", state, pr["html_url"], **effort)
+        result = Result(full, "pr-created", state, pr["html_url"], **effort)
+        if auto_merge:  # the PR as GitHub returned it, pinned to the commit just pushed and checked
+            log.info("%s: PR #%s created.", full, pr["number"])
+            result.auto_merge = _auto_merge(gh, full, plan, pr, branch, commit, False)
+        return result
     finally:
         cust.close()
         rmtree(cust.path)
@@ -2915,6 +2975,223 @@ def _close_superseded(gh: GitHub, full: str, default: str, open_prs: list, up: U
 
 
 # --------------------------------------------------------------------------- #
+# Auto-merge (--auto-merge): turn on GitHub's own auto-merge for a sync PR that passed
+# every check. GitHub then merges it only once branch protection, required reviews and
+# required checks are satisfied; nothing here merges, bypasses or changes settings.
+# --------------------------------------------------------------------------- #
+AUTO_MERGE_READY = "All validation checks passed."
+BLOCKING_LABELS = ("needs-work", "merge-conflicts")
+MERGE_METHODS = (("MERGE", "mergeCommitAllowed"), ("SQUASH", "squashMergeAllowed"), ("REBASE", "rebaseMergeAllowed"))
+AUTO_MERGE_QUERY = """query($owner: String!, $name: String!%s) {
+  repository(owner: $owner, name: $name) {
+    autoMergeAllowed mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed viewerDefaultMergeMethod%s
+  }
+}"""
+AUTO_MERGE_PR_FIELDS = (
+    " pullRequest(number: $number) { id state isDraft merged headRefOid autoMergeRequest { mergeMethod } }"
+)
+ENABLE_AUTO_MERGE = """mutation($id: ID!, $method: PullRequestMergeMethod!, $head: GitObjectID!) {
+  enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: $method, expectedHeadOid: $head}) {
+    pullRequest { autoMergeRequest { mergeMethod } }
+  }
+}"""
+
+
+def pr_state_problem(pr: dict, branch: str, full: str) -> str | None:
+    """Why this PR, as GitHub reports it now, must not auto-merge; None if its state allows it."""
+    if pr.get("merged") or pr.get("merged_at"):
+        return "the PR is already merged"
+    if pr.get("state") != "open":
+        return "the PR is closed"
+    if pr.get("draft"):
+        return "the PR is a draft"
+    head = pr.get("head") or {}
+    if head.get("ref") != branch or (head.get("repo") or {}).get("full_name") != full:
+        return f"the PR is not from this update's branch {branch}"
+    if labels := sorted({lb.get("name") for lb in pr.get("labels") or []} & set(BLOCKING_LABELS)):
+        return f"the PR is labeled {', '.join(labels)}"
+    return None
+
+
+def auto_merge_eligibility(plan: Plan, pr: dict | None, branch: str, full: str) -> tuple[bool, str]:
+    """The one place that decides whether a sync PR may auto-merge: (eligible, reason).
+    `plan` must come from this run's merge and checks, never from an earlier run or report;
+    `pr` is the PR as GitHub reports it now (None in --dry-run before a PR exists)."""
+    if pr is not None and (problem := pr_state_problem(pr, branch, full)):
+        return False, problem
+    if plan.changes["conflict"]:
+        return False, f"unresolved merge conflicts in {_n(len(plan.changes['conflict']), 'file')}"
+    if plan.blocking:  # also covers missing secrets/variables, Actions policy, broken workflows, invalid YAML
+        return False, f"needs work: {plan.work_summary}"
+    if plan.todo:  # replaced files, new defaults, mode changes: a person must confirm them
+        return False, f"a person must confirm: {plan.work_summary}"
+    if plan.versions:  # your own action versions replaced by upstream's
+        return False, f"upstream replaced {_n(len(plan.versions), 'customized action version')}; review it"
+    return True, AUTO_MERGE_READY
+
+
+def pick_merge_method(repo: dict) -> str | None:
+    """The repository's merge method: the only one allowed, else GitHub's default for this
+    token (viewerDefaultMergeMethod) when allowed, else the first allowed one."""
+    allowed = [m for m, flag in MERGE_METHODS if repo.get(flag)]
+    if len(allowed) == 1:
+        return allowed[0]
+    default = repo.get("viewerDefaultMergeMethod")
+    return default if default in allowed else (allowed[0] if allowed else None)
+
+
+def _auto_merge_failure(e: GitHubError) -> str:
+    """A short reason for the report; GitHub's own message is kept for anything unrecognized."""
+    msg, types = str(e), set(getattr(e, "types", ()))
+    low = msg.lower()
+    if "RATE_LIMITED" in types or "rate limit" in low:
+        return "GitHub rate limit reached; re-run later"
+    if "clean status" in low:
+        return "the PR can already be merged (no required reviews or checks pending), so GitHub cannot queue it; merge it by hand"
+    if "merge method" in low:
+        return f"merge method not allowed in this repository: {msg}"
+    if "auto merge is not allowed" in low or "auto-merge is not allowed" in low:
+        return "auto-merge is disabled in this repository (Settings > General > Allow auto-merge)"
+    if (
+        types & {"FORBIDDEN", "INSUFFICIENT_SCOPES"}
+        or e.status in (401, 403)
+        or "not accessible" in low
+        or "permission" in low
+    ):
+        return f"insufficient permissions to enable auto-merge: {msg}"
+    return f"GitHub refused: {msg}"
+
+
+def auto_merge_report(status: str, eligible: bool, enabled: bool, reason: str, **extra) -> dict:
+    """The `auto_merge` entry of a Result (the JSON report)."""
+    return {"requested": True, "status": status, "eligible": eligible, "enabled": enabled, "reason": reason, **extra}
+
+
+def github_auto_merge(gh: GitHub, full: str, number: int | None, head_sha: str | None, dry_run: bool) -> dict:
+    """Turn on GitHub's auto-merge for an eligible PR. Reads the repo's settings and the PR's
+    state first; in --dry-run (or with no PR yet) it stops after reading. The mutation pins
+    the head commit that was checked, so GitHub refuses it if the branch moved since. Never
+    raises: a failure here does not fail the sync."""
+    never = "would-not-auto-merge" if dry_run else "auto-merge-unavailable"
+    owner, name = full.split("/")
+    variables: dict = {"owner": owner, "name": name}
+    if number is not None:
+        variables["number"] = number
+    query = AUTO_MERGE_QUERY % ((", $number: Int!", AUTO_MERGE_PR_FIELDS) if number is not None else ("", ""))
+    try:
+        repo = gh.graphql(query, variables).get("repository") or {}
+    except GitHubError as e:
+        return auto_merge_report(never, True, False, _auto_merge_failure(e))
+    method = pick_merge_method(repo)
+    out = {"merge_method": method.lower() if method else None}
+    pr = repo.get("pullRequest") if number is not None else None
+    if number is not None:
+        if not pr:
+            return auto_merge_report(never, True, False, "the PR could not be read", **out)
+        if pr.get("merged") or pr.get("state") != "OPEN":
+            state = "merged" if pr.get("merged") else "closed"
+            return auto_merge_report(
+                "would-not-auto-merge" if dry_run else "auto-merge-ineligible",
+                False,
+                False,
+                f"the PR is {state}",
+                **out,
+            )
+        if pr.get("autoMergeRequest"):
+            done = (pr["autoMergeRequest"].get("mergeMethod") or "").lower() or None
+            return auto_merge_report(
+                "auto-merge-already-enabled", True, True, "auto-merge is already enabled", merge_method=done
+            )
+        if pr.get("isDraft"):
+            return auto_merge_report(
+                "would-not-auto-merge" if dry_run else "auto-merge-ineligible", False, False, "the PR is a draft", **out
+            )
+        if head_sha and pr.get("headRefOid") != head_sha:
+            return auto_merge_report(never, False, False, "the PR branch changed after it was checked; re-run", **out)
+    if not repo.get("autoMergeAllowed"):
+        return auto_merge_report(
+            never,
+            True,
+            False,
+            "auto-merge is disabled in this repository (Settings > General > Allow auto-merge)",
+            **out,
+        )
+    if method is None:
+        return auto_merge_report(never, True, False, "the repository allows no merge method", **out)
+    if dry_run or pr is None:
+        return auto_merge_report("would-auto-merge", True, False, AUTO_MERGE_READY, **out)
+    try:
+        gh.graphql(ENABLE_AUTO_MERGE, {"id": pr["id"], "method": method, "head": head_sha or pr["headRefOid"]})
+    except GitHubError as e:
+        return auto_merge_report(never, True, False, _auto_merge_failure(e), **out)
+    return auto_merge_report("auto-merge-enabled", True, True, AUTO_MERGE_READY, **out)
+
+
+def _changes(before: Tree, after: Tree) -> dict:
+    """path -> new entry (None: deleted) for every file that differs, the marker aside."""
+    return {p: after.get(p) for p in set(before) | set(after) if p != MARKER and before.get(p) != after.get(p)}
+
+
+def existing_pr_problem(
+    gh: GitHub, cust: Git, full: str, default: str, head: str, ours: Tree, plan: Plan, pr: dict
+) -> tuple[str | None, str]:
+    """(problem, head commit) for an open sync PR: it must hold only this tool's commits, and
+    change exactly what a fresh sync of the current default branch changes (this run's checks
+    then apply to it). The default branch may have moved on in files the update leaves alone."""
+    cust.run("fetch", "--quiet", "origin", f"+refs/pull/{pr['number']}/head:refs/vsync/pr")
+    pr_head = cust.rev("refs/vsync/pr")
+    if pr_head != (pr.get("head") or {}).get("sha"):
+        return "the PR branch changed while it was being checked; re-run", pr_head
+    if not tool_only(gh, full, default, pr["head"]["ref"]):
+        return "the PR branch has commits from someone else; review and merge it by hand", pr_head
+    since = cust.ls_tree(cust.run("merge-base", head, pr_head).strip())
+    if _changes(since, cust.ls_tree(pr_head)) != _changes(ours, plan.final):
+        return f"the PR no longer matches a fresh sync of {default}; close it and re-run to replace it", pr_head
+    return None, pr_head
+
+
+def _auto_merge(
+    gh: GitHub,
+    full: str,
+    plan: Plan | None,
+    pr: dict | None,
+    branch: str,
+    head_sha: str | None,
+    dry_run: bool,
+    problem: str | None = None,
+) -> dict:
+    """Eligibility, then (if eligible) GitHub's auto-merge, with the log lines for both.
+    `problem` (or no plan: the PR was never re-checked) makes the PR ineligible outright."""
+    if problem or plan is None:
+        eligible, reason = False, problem or "the PR could not be re-checked"
+    else:
+        eligible, reason = auto_merge_eligibility(plan, pr, branch, full)
+    number = pr["number"] if pr else None
+    validation = {"effort": plan.effort, "work": plan.work_summary} if plan else {}
+    if not eligible:
+        enabled = bool(pr and pr.get("auto_merge"))
+        if enabled:  # turned on earlier; left to the people who own the PR
+            reason += " (auto-merge is still enabled on the PR from before; disable it there if needed)"
+        log.warning("%s: Auto-merge skipped. Reason: %s", full, reason)
+        status = "would-not-auto-merge" if dry_run else "auto-merge-ineligible"
+        return auto_merge_report(status, False, enabled, reason, pr_number=number, validation=validation)
+    log.info("%s: Auto-merge eligibility: PASSED", full)
+    result = github_auto_merge(gh, full, number, head_sha, dry_run)
+    result.update(pr_number=number, validation=validation)
+    status, method = result["status"], result.get("merge_method")
+    if status == "would-auto-merge":
+        where = f"PR #{number}" if number else "the new PR"
+        log.info("[DRY-RUN] %s: Would enable auto-merge on %s (%s)", full, where, method)
+    elif status == "auto-merge-enabled":
+        log.info("%s: GitHub auto-merge enabled (%s) on PR #%s", full, method, number)
+    elif status == "auto-merge-already-enabled":
+        log.info("%s: Auto-merge already enabled (%s) on PR #%s", full, method, number)
+    else:
+        log.warning("%s: Auto-merge not enabled. Reason: %s", full, result["reason"])
+    return result
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 def read_orgs_file(path: str) -> list[str]:
@@ -3025,6 +3302,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="write the patch and PR text to --out-dir; push nothing",
     )
     ap.add_argument("--out-dir", default="out", help="dry-run output folder (default: out)")
+    ap.add_argument(
+        "--auto-merge",
+        action="store_true",
+        help="enable GitHub's native auto-merge on sync PRs that pass every check (GitHub still enforces "
+        "branch protection, required reviews and checks); with --dry-run, report which PRs would qualify",
+    )
     ap.add_argument("--reviewers", nargs="+", default=[], help="users and/or team:<slug> to request")
     ap.add_argument(
         "--force",
@@ -3073,6 +3356,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ap.error("--git-timeout must be a positive number of seconds")
     if not 1 <= args.workers <= MAX_WORKERS:
         ap.error(f"--workers must be between 1 and {MAX_WORKERS}")
+    if args.auto_merge and args.revert:
+        ap.error("--auto-merge cannot be used with --revert")
     api = urllib.parse.urlsplit(args.api_base)
     if api.scheme != "https" and not (api.scheme == "http" and api.hostname in ("localhost", "127.0.0.1", "::1")):
         ap.error("--api-base must be an https:// URL (the token is sent to it)")
@@ -3179,6 +3464,9 @@ def print_results(results: list[Result], gh: GitHub, args: argparse.Namespace, u
     print(f"\n{'REPO':<{width}}  {'STATUS':<12}  {'EFFORT':<7}  DETAIL")
     for r in results:
         extra = f"  ({r.work or r.detail})" if r.pr and (r.work or r.detail) else ""
+        if r.auto_merge:
+            ok = r.auto_merge["status"] in ("auto-merge-enabled", "auto-merge-already-enabled", "would-auto-merge")
+            extra += f"  [{r.auto_merge['status']}" + ("" if ok else f": {r.auto_merge['reason']}") + "]"
         print(f"{r.repo:<{width}}  {r.status:<12}  {r.effort or '-':<7}  {r.pr or r.detail}{extra}")
     counts = collections.Counter(r.status for r in results)
     print(
@@ -3186,10 +3474,16 @@ def print_results(results: list[Result], gh: GitHub, args: argparse.Namespace, u
         + ", ".join(f"{k}: {v}" for k, v in sorted(counts.items()))
         + f" | API requests: {gh.limiter.requests}, rate-limit waits: {gh.limiter.waited:.0f}s"
     )
+    if merges := collections.Counter(r.auto_merge["status"] for r in results if r.auto_merge):
+        print("Auto-merge: " + ", ".join(f"{k}: {v}" for k, v in sorted(merges.items())))
     if args.report:
+        rows = [dataclasses.asdict(r) for r in results]
+        for row in rows:  # without --auto-merge the report is unchanged
+            if not row["auto_merge"]:
+                del row["auto_merge"]
         report = {
             "upstream": upstream,
-            "results": [dataclasses.asdict(r) for r in results],
+            "results": rows,
         }
         try:
             report_path = Path(args.report)
@@ -3277,8 +3571,17 @@ def _rows_for(r: Result) -> tuple[int, list[dict]]:
                     "details": "Someone fixed it and marked it ready: check the changes",
                 }
             ]
+        am = r.auto_merge.get("status") if isinstance(r.auto_merge, dict) else None
         if r.status == "dry-run":
-            rows.append({"action": "Open the PR", "details": "Run again without --dry-run"})
+            note = " (auto-merge would be enabled)" if am == "would-auto-merge" else ""
+            rows.append({"action": "Open the PR", "details": f"Run again without --dry-run{note}"})
+        elif am in ("auto-merge-enabled", "auto-merge-already-enabled"):
+            rows.append(
+                {
+                    "action": "Wait for auto-merge",
+                    "details": "GitHub merges it once required reviews and checks pass; then run one scan",
+                }
+            )
         else:
             rows.append(
                 {
