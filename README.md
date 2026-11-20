@@ -51,6 +51,27 @@ Re-running is safe.
 
 Python 3.10+, git 2.31+, and `pip install -r requirements.txt`.
 
+### GitHub App (multi-org)
+
+```bash
+export GITHUB_APP_ID=123456
+export GITHUB_APP_PRIVATE_KEY="$(cat app.private-key.pem)"
+```
+
+`GITHUB_APP_PRIVATE_KEY` takes the PEM text, the PEM on one line with `\n`, or a path to the `.pem` file. The script signs a JWT, looks up each org's installation (`GET /orgs/{org}/installation`), mints a 1-hour installation token per org and caches it, renewing 10 minutes before expiry. Orgs where the App is not installed (or suspended) are reported and skipped; the run continues. Needs `pip install "PyJWT[crypto]"`. Without `--orgs`, every org the App is installed on is synced. Commits and PRs are authored by the App's bot (`<app-slug>[bot]`).
+
+|Permission|Access|Why|
+|---|---|---|
+|Contents|Read and write|clone, push the sync branch, revert|
+|Pull requests|Read and write|open, label, close and auto-merge PRs|
+|Workflows|Read and write|push `.github/workflows/*`|
+|Issues|Read and write|create the `veracode-upstream-sync` label|
+|Secrets, Variables, Administration (org), Actions|Read|settings checks in the PR To do list (optional)|
+
+A repo is skipped when the App lacks Contents, Pull requests or Workflows write.
+
+### Personal access token (fallback when the App variables are not set)
+
 Token in `GH_TOKEN` or `GITHUB_TOKEN`, or a `gh auth login` session:
 
 - **Classic PAT:** `repo`, `workflow`, `read:org`. Authorize it for SAML SSO orgs.
